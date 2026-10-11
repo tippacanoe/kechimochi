@@ -19,6 +19,7 @@ pub mod sync_orchestrator;
 pub mod sync_snapshot;
 pub mod sync_state;
 pub mod timeline_data;
+pub mod tracked_app_time;
 
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
