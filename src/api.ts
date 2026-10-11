@@ -62,6 +62,11 @@ export type {
   SyncConflictResolution,
   SyncProgressUpdate,
   SyncStatus,
+  TrackedApp,
+  UsageEntry,
+  UsageSource,
+  UsagePlatform,
+  AppDailyTotal,
 } from './types';
 
 import type {
@@ -104,6 +109,9 @@ import type {
   SyncConflictResolution,
   SyncProgressUpdate,
   SyncStatus,
+  TrackedApp,
+  UsageEntry,
+  AppDailyTotal,
 } from './types';
 
 declare global {
@@ -213,6 +221,18 @@ export function applyMediaImport(records: MediaCsvImportSelection[]): Promise<nu
 export function applyActivityImport(request: ActivityCsvImportRequest): Promise<ActivityCsvImportResult> {
   return getServices().applyActivityImport(request);
 }
+
+// Tracked App Time (soft-fork feature).
+export function getTrackedApps(includeArchived = false): Promise<TrackedApp[]> { return getServices().getTrackedApps(includeArchived); }
+export function addTrackedApp(app: TrackedApp): Promise<number> { return getServices().addTrackedApp(app); }
+export function updateTrackedApp(app: TrackedApp): Promise<void> { return getServices().updateTrackedApp(app); }
+export function setTrackedAppArchived(id: number, archived: boolean): Promise<void> { return getServices().setTrackedAppArchived(id, archived); }
+export function addUsageEntry(entry: UsageEntry): Promise<number> { return getServices().addUsageEntry(entry); }
+export function setUsageEntryAdjustment(id: number, adjustment: number | null): Promise<void> { return getServices().setUsageEntryAdjustment(id, adjustment); }
+export function deleteUsageEntry(id: number): Promise<void> { return getServices().deleteUsageEntry(id); }
+export function getUsageEntriesForDay(trackedAppUid: string, date: string): Promise<UsageEntry[]> { return getServices().getUsageEntriesForDay(trackedAppUid, date); }
+export function getTrackedAppDailyTotals(date: string): Promise<AppDailyTotal[]> { return getServices().getTrackedAppDailyTotals(date); }
+export function getTrackedAppTotalMinutes(date: string): Promise<number> { return getServices().getTrackedAppTotalMinutes(date); }
 
 export function getMilestones(mediaUid: string): Promise<Milestone[]> { return getServices().getMilestones(mediaUid); }
 export function addMilestone(milestone: Milestone): Promise<number> { return getServices().addMilestone(milestone); }

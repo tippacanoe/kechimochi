@@ -50,6 +50,9 @@ import type {
     SyncConflictResolution,
     SyncProgressUpdate,
     SyncStatus,
+    TrackedApp,
+    UsageEntry,
+    AppDailyTotal,
 } from '../types';
 import { getBuildVersion } from '../app_version';
 import { getMockExternalJsonResponse } from './external_mocks';
@@ -280,6 +283,38 @@ export class DesktopServices implements AppServices {
             if (!selected || typeof selected !== 'string') return 0;
             return invoke<number>('import_milestones_csv', { filePath: selected });
         });
+    }
+
+    // ── Tracked App Time operations (soft-fork feature) ──────────────────────
+    getTrackedApps(includeArchived: boolean): Promise<TrackedApp[]> {
+        return invoke('get_tracked_apps', { includeArchived });
+    }
+    addTrackedApp(app: TrackedApp): Promise<number> {
+        return invoke('add_tracked_app', { app });
+    }
+    updateTrackedApp(app: TrackedApp): Promise<void> {
+        return invoke('update_tracked_app', { app });
+    }
+    setTrackedAppArchived(id: number, archived: boolean): Promise<void> {
+        return invoke('set_tracked_app_archived', { id, archived });
+    }
+    addUsageEntry(entry: UsageEntry): Promise<number> {
+        return invoke('add_usage_entry', { entry });
+    }
+    setUsageEntryAdjustment(id: number, adjustment: number | null): Promise<void> {
+        return invoke('set_usage_entry_adjustment', { id, adjustment });
+    }
+    deleteUsageEntry(id: number): Promise<void> {
+        return invoke('delete_usage_entry', { id });
+    }
+    getUsageEntriesForDay(trackedAppUid: string, date: string): Promise<UsageEntry[]> {
+        return invoke('get_usage_entries_for_day', { trackedAppUid, date });
+    }
+    getTrackedAppDailyTotals(date: string): Promise<AppDailyTotal[]> {
+        return invoke('get_tracked_app_daily_totals', { date });
+    }
+    getTrackedAppTotalMinutes(date: string): Promise<number> {
+        return invoke('get_tracked_app_total_minutes', { date });
     }
 
     // ── Report card operations ────────────────────────────────────────────────

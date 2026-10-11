@@ -48,6 +48,9 @@ import type {
     SyncConflictResolution,
     SyncProgressUpdate,
     SyncStatus,
+    TrackedApp,
+    UsageEntry,
+    AppDailyTotal,
 } from '../types';
 import { getBuildVersion } from '../app_version';
 import { getMockExternalJsonResponse } from './external_mocks';
@@ -403,6 +406,40 @@ export class WebServices implements AppServices {
         if (!res.ok) throw new Error(await res.text());
         const { count } = await res.json();
         return count as number;
+    }
+
+    // ── Tracked App Time operations (soft-fork feature) ──────────────────────
+    getTrackedApps(includeArchived: boolean): Promise<TrackedApp[]> {
+        return get(`/tracked-apps?include_archived=${includeArchived}`);
+    }
+    addTrackedApp(app: TrackedApp): Promise<number> {
+        return post('/tracked-apps', app);
+    }
+    updateTrackedApp(app: TrackedApp): Promise<void> {
+        return put(`/tracked-apps/${app.id}`, app);
+    }
+    setTrackedAppArchived(id: number, archived: boolean): Promise<void> {
+        return post(`/tracked-apps/${id}/archive`, { archived });
+    }
+    addUsageEntry(entry: UsageEntry): Promise<number> {
+        return post('/usage-entries', entry);
+    }
+    setUsageEntryAdjustment(id: number, adjustment: number | null): Promise<void> {
+        return post(`/usage-entries/${id}/adjustment`, { adjustment });
+    }
+    deleteUsageEntry(id: number): Promise<void> {
+        return del(`/usage-entries/${id}`);
+    }
+    getUsageEntriesForDay(trackedAppUid: string, date: string): Promise<UsageEntry[]> {
+        return get(
+            `/usage-entries?tracked_app_uid=${encodeURIComponent(trackedAppUid)}&date=${encodeURIComponent(date)}`,
+        );
+    }
+    getTrackedAppDailyTotals(date: string): Promise<AppDailyTotal[]> {
+        return get(`/tracked-app-totals/daily?date=${encodeURIComponent(date)}`);
+    }
+    getTrackedAppTotalMinutes(date: string): Promise<number> {
+        return get(`/tracked-app-totals/minutes?date=${encodeURIComponent(date)}`);
     }
 
     // ── Report card operations ────────────────────────────────────────────────
