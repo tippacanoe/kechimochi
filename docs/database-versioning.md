@@ -106,9 +106,13 @@ and additive — the `v8` to `v9` migration creates them and never alters an
 existing table, so no pre-existing row changes meaning. The DDL, migration, and
 schema validation live in the isolated `tracked_app_time` module rather than in
 `db.rs`, to keep this soft-fork feature low-conflict against future upstream
-rebases. Each table carries a stable sync `uid`, so the records ride existing
-three-way sync as identified collections; the merged daily total per app is a
-derived sum of displayed values, never a stored row.
+rebases. Each table carries a stable sync `uid`. Sync snapshots gained two
+optional sections (`tracked_apps`, `usage_entries`) that default to empty, so a
+snapshot written by an older client loads unchanged. Tracked apps merge as
+last-writer-wins identity records (the same tier as settings), while usage
+entries use a keep-all-contributions merge: distinct entries from different
+devices always coexist and the merged daily total per app is summed on read from
+displayed values, never stored (spec §3.4/§7).
 
 ## Storage Model
 

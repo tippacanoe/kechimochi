@@ -860,6 +860,8 @@ mod tests {
             settings: Default::default(),
             profile_picture: None,
             tombstones: Vec::new(),
+            tracked_apps: std::collections::BTreeMap::new(),
+            usage_entries: Vec::new(),
         }
     }
 
@@ -1074,6 +1076,8 @@ mod tests {
             settings: Default::default(),
             profile_picture: None,
             tombstones: Vec::new(),
+            tracked_apps: std::collections::BTreeMap::new(),
+            usage_entries: Vec::new(),
         };
 
         save_base_snapshot(temp_dir.path(), &snapshot).unwrap();
@@ -1100,6 +1104,8 @@ mod tests {
             settings: Default::default(),
             profile_picture: None,
             tombstones: Vec::new(),
+            tracked_apps: std::collections::BTreeMap::new(),
+            usage_entries: Vec::new(),
         };
 
         save_pending_merged_snapshot(temp_dir.path(), &snapshot).unwrap();
@@ -1151,6 +1157,8 @@ mod tests {
             settings: Default::default(),
             profile_picture: None,
             tombstones: Vec::new(),
+            tracked_apps: std::collections::BTreeMap::new(),
+            usage_entries: Vec::new(),
         };
         let journal_conflict = SyncConflict::MediaFieldConflict {
             media_uid: "uid_journal".to_string(),

@@ -7,8 +7,8 @@ use serde_json::{Map, Value};
 use crate::db;
 use crate::sync_snapshot::{
     SnapshotActivity, SnapshotMediaAggregate, SnapshotMilestone, SnapshotProfile,
-    SnapshotProfilePicture, SnapshotSettingValue, SnapshotTombstone, SyncSnapshot,
-    SYNC_PROTOCOL_VERSION,
+    SnapshotProfilePicture, SnapshotSettingValue, SnapshotTombstone, SnapshotTrackedApp,
+    SnapshotUsageEntry, SyncSnapshot, SYNC_PROTOCOL_VERSION,
 };
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -158,11 +158,16 @@ pub fn merge_snapshots(
         }
     }
 
+    let merged_tracked_apps = merge_tracked_apps(base, local, remote);
+    let merged_usage_entries = merge_usage_entries(base, local, remote);
+
     merged_snapshot.profile = merged_profile;
     merged_snapshot.library = merged_library;
     merged_snapshot.settings = merged_settings;
     merged_snapshot.profile_picture = merged_profile_picture;
     merged_snapshot.tombstones = merged_tombstones.into_values().collect();
+    merged_snapshot.tracked_apps = merged_tracked_apps;
+    merged_snapshot.usage_entries = merged_usage_entries;
 
     Ok(SyncMergeOutcome {
         merged_snapshot,
@@ -200,6 +205,19 @@ fn validate_merge_inputs(
                 "milestone",
                 media.milestones.iter().map(|record| record.uid.as_str()),
             )?;
+        }
+
+        let mut seen_usage = HashSet::new();
+        for entry in &snapshot.usage_entries {
+            if entry.uid.trim().is_empty() {
+                return Err("A usage entry has a blank sync UID".to_string());
+            }
+            if !seen_usage.insert(entry.uid.as_str()) {
+                return Err(format!(
+                    "Snapshot contains duplicate usage-entry sync UID '{}'",
+                    entry.uid
+                ));
+            }
         }
     }
 
@@ -1167,6 +1185,180 @@ fn merge_profile_picture(
     }
 }
 
+// --- Tracked App Time merge (spec §3.4 / §7) -------------------------------
+
+/// Merge tracked apps as last-writer-wins identity records, the same tier as
+/// settings: the union of all uids, each resolved by its derived
+/// `updated_at`/`updated_by_device_id` when both sides changed. These are config
+/// records with no additive semantics, so this never raises a user conflict.
+fn merge_tracked_apps(
+    base: Option<&SyncSnapshot>,
+    local: &SyncSnapshot,
+    remote: &SyncSnapshot,
+) -> BTreeMap<String, SnapshotTrackedApp> {
+    let mut uids = BTreeSet::new();
+    if let Some(base) = base {
+        uids.extend(base.tracked_apps.keys().cloned());
+    }
+    uids.extend(local.tracked_apps.keys().cloned());
+    uids.extend(remote.tracked_apps.keys().cloned());
+
+    let mut merged = BTreeMap::new();
+    for uid in uids {
+        if let Some(app) = choose_lww_tracked_app(
+            base.and_then(|snapshot| snapshot.tracked_apps.get(&uid)),
+            local.tracked_apps.get(&uid),
+            remote.tracked_apps.get(&uid),
+        ) {
+            merged.insert(uid, app);
+        }
+    }
+    merged
+}
+
+fn choose_lww_tracked_app(
+    base: Option<&SnapshotTrackedApp>,
+    local: Option<&SnapshotTrackedApp>,
+    remote: Option<&SnapshotTrackedApp>,
+) -> Option<SnapshotTrackedApp> {
+    let local_changed = local != base;
+    let remote_changed = remote != base;
+
+    match (local_changed, remote_changed) {
+        (false, false) => base
+            .cloned()
+            .or_else(|| local.cloned())
+            .or_else(|| remote.cloned()),
+        (true, false) => local.cloned(),
+        (false, true) => remote.cloned(),
+        (true, true) => match (local, remote) {
+            (Some(local), Some(remote)) => {
+                if compare_timestamp_and_device(
+                    &local.updated_at,
+                    &local.updated_by_device_id,
+                    &remote.updated_at,
+                    &remote.updated_by_device_id,
+                ) == Ordering::Greater
+                {
+                    Some(local.clone())
+                } else {
+                    Some(remote.clone())
+                }
+            }
+            (Some(local), None) => Some(local.clone()),
+            (None, Some(remote)) => Some(remote.clone()),
+            (None, None) => None,
+        },
+    }
+}
+
+/// Merge usage entries as keep-all contributions, keyed by uid. Distinct entries
+/// from different devices always coexist (summed on read), so the common case is
+/// a plain union with no conflict — this is the one genuinely new sync behavior
+/// the spec calls for. A uid present on only one side is an add (kept) unless it
+/// is unchanged there and gone from the other side relative to base (a delete).
+/// The rare case of the *same* uid independently edited to different values on
+/// two devices is resolved deterministically rather than surfaced as a conflict.
+fn merge_usage_entries(
+    base: Option<&SyncSnapshot>,
+    local: &SyncSnapshot,
+    remote: &SyncSnapshot,
+) -> Vec<SnapshotUsageEntry> {
+    let index = |entries: &[SnapshotUsageEntry]| -> HashMap<String, SnapshotUsageEntry> {
+        entries
+            .iter()
+            .map(|entry| (entry.uid.clone(), entry.clone()))
+            .collect()
+    };
+    let base_by_uid = base.map(|snapshot| index(&snapshot.usage_entries));
+    let local_by_uid = index(&local.usage_entries);
+    let remote_by_uid = index(&remote.usage_entries);
+
+    let mut uids = BTreeSet::new();
+    if let Some(base_by_uid) = &base_by_uid {
+        uids.extend(base_by_uid.keys().cloned());
+    }
+    uids.extend(local_by_uid.keys().cloned());
+    uids.extend(remote_by_uid.keys().cloned());
+
+    let mut merged = Vec::new();
+    for uid in uids {
+        let chosen = choose_usage_entry(
+            base_by_uid.as_ref().and_then(|map| map.get(&uid)),
+            local_by_uid.get(&uid),
+            remote_by_uid.get(&uid),
+        );
+        if let Some(entry) = chosen {
+            merged.push(entry);
+        }
+    }
+    merged.sort_by(usage_entry_sort);
+    merged
+}
+
+fn choose_usage_entry(
+    base: Option<&SnapshotUsageEntry>,
+    local: Option<&SnapshotUsageEntry>,
+    remote: Option<&SnapshotUsageEntry>,
+) -> Option<SnapshotUsageEntry> {
+    match (local, remote) {
+        (Some(local), Some(remote)) => {
+            if local == remote {
+                Some(local.clone())
+            } else if Some(local) == base {
+                Some(remote.clone())
+            } else if Some(remote) == base {
+                Some(local.clone())
+            } else {
+                // Both sides edited the same entry differently. Pick
+                // deterministically (identically on every device) rather than
+                // raising a user conflict, since usage is additive data.
+                Some(pick_divergent_usage_entry(local, remote).clone())
+            }
+        }
+        // Present on one side only: an add is kept; an entry unchanged on the
+        // surviving side but gone from the other (relative to base) is a delete.
+        (Some(local), None) => (Some(local) != base).then(|| local.clone()),
+        (None, Some(remote)) => (Some(remote) != base).then(|| remote.clone()),
+        (None, None) => None,
+    }
+}
+
+/// Deterministic tiebreak for the same usage-entry uid edited to different
+/// values on two devices: keep the larger displayed value, then the larger raw
+/// value, then an adjusted entry over an unadjusted one, then by
+/// source/platform/date. Content-only, so both devices converge on the same pick.
+fn pick_divergent_usage_entry<'a>(
+    local: &'a SnapshotUsageEntry,
+    remote: &'a SnapshotUsageEntry,
+) -> &'a SnapshotUsageEntry {
+    if usage_entry_rank(local) >= usage_entry_rank(remote) {
+        local
+    } else {
+        remote
+    }
+}
+
+fn usage_entry_rank(entry: &SnapshotUsageEntry) -> (i64, i64, i64, &str, &str, &str) {
+    (
+        entry.manual_adjustment_minutes.unwrap_or(entry.minutes),
+        entry.minutes,
+        entry.manual_adjustment_minutes.unwrap_or(-1),
+        entry.source.as_str(),
+        entry.platform.as_str(),
+        entry.date.as_str(),
+    )
+}
+
+fn usage_entry_sort(left: &SnapshotUsageEntry, right: &SnapshotUsageEntry) -> Ordering {
+    left.tracked_app_uid
+        .cmp(&right.tracked_app_uid)
+        .then_with(|| left.date.cmp(&right.date))
+        .then_with(|| left.source.cmp(&right.source))
+        .then_with(|| left.platform.cmp(&right.platform))
+        .then_with(|| left.uid.cmp(&right.uid))
+}
+
 fn compare_timestamp_and_device(
     left_timestamp: &str,
     left_device_id: &str,
@@ -1240,6 +1432,8 @@ mod tests {
             settings: BTreeMap::new(),
             profile_picture: None,
             tombstones: Vec::new(),
+            tracked_apps: std::collections::BTreeMap::new(),
+            usage_entries: Vec::new(),
         }
     }
 
@@ -2023,5 +2217,166 @@ mod tests {
                 .base64_data,
             "local"
         );
+    }
+
+    // --- Tracked App Time merge (Phase 5) -----------------------------------
+
+    fn tracked_app(uid: &str, name: &str, updated_at: &str, device: &str) -> SnapshotTrackedApp {
+        SnapshotTrackedApp {
+            uid: uid.to_string(),
+            display_name: name.to_string(),
+            android_package_name: None,
+            icon: None,
+            auto_tracking_enabled: false,
+            manual_entry_enabled: true,
+            created_at: "2026-04-01T00:00:00Z".to_string(),
+            archived: false,
+            updated_at: updated_at.to_string(),
+            updated_by_device_id: device.to_string(),
+        }
+    }
+
+    fn usage_entry(uid: &str, app_uid: &str, minutes: i64, source: &str) -> SnapshotUsageEntry {
+        SnapshotUsageEntry {
+            uid: uid.to_string(),
+            tracked_app_uid: app_uid.to_string(),
+            date: "2026-10-11".to_string(),
+            minutes,
+            source: source.to_string(),
+            platform: "android".to_string(),
+            manual_adjustment_minutes: None,
+        }
+    }
+
+    #[test]
+    fn test_merge_usage_entries_from_both_devices_are_kept_and_summed() {
+        let mut base = empty_snapshot();
+        let mut local = empty_snapshot();
+        let mut remote = empty_snapshot();
+        base.tracked_apps
+            .insert("app".to_string(), tracked_app("app", "AnkiDroid", "t0", "d0"));
+        local
+            .tracked_apps
+            .insert("app".to_string(), tracked_app("app", "AnkiDroid", "t0", "d0"));
+        remote
+            .tracked_apps
+            .insert("app".to_string(), tracked_app("app", "AnkiDroid", "t0", "d0"));
+
+        // Each device collected a distinct contribution for the same app/day.
+        local
+            .usage_entries
+            .push(usage_entry("u-local", "app", 30, "android_auto"));
+        remote
+            .usage_entries
+            .push(usage_entry("u-remote", "app", 90, "android_auto"));
+
+        let outcome = merge_snapshots(Some(&base), &local, &remote).unwrap();
+        assert!(outcome.conflicts.is_empty());
+        assert_eq!(outcome.merged_snapshot.usage_entries.len(), 2);
+        let total: i64 = outcome
+            .merged_snapshot
+            .usage_entries
+            .iter()
+            .map(|entry| entry.manual_adjustment_minutes.unwrap_or(entry.minutes))
+            .sum();
+        assert_eq!(total, 120);
+    }
+
+    #[test]
+    fn test_merge_identical_usage_entries_dedupe() {
+        let mut base = empty_snapshot();
+        let mut local = empty_snapshot();
+        let mut remote = empty_snapshot();
+        let shared = usage_entry("u1", "app", 45, "manual");
+        // Same entry already synced to both sides.
+        base.usage_entries.push(shared.clone());
+        local.usage_entries.push(shared.clone());
+        remote.usage_entries.push(shared);
+
+        let outcome = merge_snapshots(Some(&base), &local, &remote).unwrap();
+        assert!(outcome.conflicts.is_empty());
+        assert_eq!(outcome.merged_snapshot.usage_entries.len(), 1);
+    }
+
+    #[test]
+    fn test_merge_usage_entry_delete_vs_unchanged_removes_it() {
+        let mut base = empty_snapshot();
+        let mut local = empty_snapshot();
+        let remote = empty_snapshot();
+        let entry = usage_entry("u1", "app", 20, "manual");
+        base.usage_entries.push(entry.clone());
+        // Local kept it unchanged; remote deleted it.
+        local.usage_entries.push(entry);
+
+        let outcome = merge_snapshots(Some(&base), &local, &remote).unwrap();
+        assert!(outcome.merged_snapshot.usage_entries.is_empty());
+    }
+
+    #[test]
+    fn test_merge_usage_entry_delete_vs_edit_keeps_the_edit() {
+        let mut base = empty_snapshot();
+        let mut local = empty_snapshot();
+        let remote = empty_snapshot();
+        base.usage_entries.push(usage_entry("u1", "app", 20, "manual"));
+        // Local edited (adjusted) the entry; remote deleted it. Data wins.
+        let mut edited = usage_entry("u1", "app", 20, "manual");
+        edited.manual_adjustment_minutes = Some(5);
+        local.usage_entries.push(edited);
+
+        let outcome = merge_snapshots(Some(&base), &local, &remote).unwrap();
+        assert_eq!(outcome.merged_snapshot.usage_entries.len(), 1);
+        assert_eq!(
+            outcome.merged_snapshot.usage_entries[0].manual_adjustment_minutes,
+            Some(5)
+        );
+    }
+
+    #[test]
+    fn test_merge_tracked_apps_last_writer_wins() {
+        let mut base = empty_snapshot();
+        let mut local = empty_snapshot();
+        let mut remote = empty_snapshot();
+        base.tracked_apps
+            .insert("app".to_string(), tracked_app("app", "Original", "t0", "d0"));
+
+        // Both renamed the app; remote's edit is later.
+        let mut local_app = tracked_app("app", "Local Name", "2026-04-02T09:00:00Z", "d_local");
+        local_app.archived = false;
+        let remote_app = tracked_app("app", "Remote Name", "2026-04-02T10:00:00Z", "d_remote");
+        local.tracked_apps.insert("app".to_string(), local_app);
+        remote.tracked_apps.insert("app".to_string(), remote_app);
+
+        let outcome = merge_snapshots(Some(&base), &local, &remote).unwrap();
+        assert!(outcome.conflicts.is_empty());
+        assert_eq!(
+            outcome.merged_snapshot.tracked_apps["app"].display_name,
+            "Remote Name"
+        );
+    }
+
+    #[test]
+    fn test_merge_tracked_app_added_on_one_side_survives() {
+        let base = empty_snapshot();
+        let mut local = empty_snapshot();
+        let remote = empty_snapshot();
+        local
+            .tracked_apps
+            .insert("new".to_string(), tracked_app("new", "Renshuu", "t1", "d_local"));
+
+        let outcome = merge_snapshots(Some(&base), &local, &remote).unwrap();
+        assert!(outcome.conflicts.is_empty());
+        assert!(outcome.merged_snapshot.tracked_apps.contains_key("new"));
+    }
+
+    #[test]
+    fn test_merge_rejects_duplicate_usage_entry_uid() {
+        let base = empty_snapshot();
+        let mut local = empty_snapshot();
+        let remote = empty_snapshot();
+        local.usage_entries.push(usage_entry("dup", "app", 10, "manual"));
+        local.usage_entries.push(usage_entry("dup", "app", 20, "manual"));
+
+        let error = merge_snapshots(Some(&base), &local, &remote).unwrap_err();
+        assert!(error.contains("duplicate usage-entry sync UID"));
     }
 }

@@ -635,6 +635,31 @@ pub fn get_tracked_app_total_minutes(conn: &Connection, date: &str) -> Result<i6
     )
 }
 
+// ---------------------------------------------------------------------------
+// Sync support (used by sync_snapshot build/apply)
+// ---------------------------------------------------------------------------
+
+/// Every usage entry across all apps and days, ordered deterministically. Used
+/// when building a sync snapshot.
+pub(crate) fn all_usage_entries(conn: &Connection) -> Result<Vec<UsageEntry>> {
+    let sql = format!(
+        "{USAGE_ENTRY_SELECT} \
+         ORDER BY tracked_app_uid ASC, date ASC, source ASC, platform ASC, uid ASC"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map([], map_usage_entry)?;
+    rows.collect()
+}
+
+/// Delete all tracked-app-time rows, in preparation for re-applying a synced
+/// snapshot. Usage entries are cleared before tracked apps so the logical
+/// parent is removed last.
+pub(crate) fn clear_for_sync_apply(conn: &Connection) -> Result<()> {
+    conn.execute("DELETE FROM main.usage_entries", [])?;
+    conn.execute("DELETE FROM main.tracked_apps", [])?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
