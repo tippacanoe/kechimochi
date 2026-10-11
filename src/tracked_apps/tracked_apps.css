@@ -200,6 +200,59 @@
     gap: 6px;
 }
 
+/* Combined "Japanese time today" card, mounted on the dashboard. */
+.combined-today-card {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    padding: 16px 18px;
+    background: var(--bg-card);
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-md);
+}
+
+.combined-today-label {
+    color: var(--text-secondary);
+    font-size: 0.85rem;
+}
+
+.combined-today-value {
+    color: var(--text-primary);
+    font-size: 1.8rem;
+    font-weight: 700;
+    font-variant-numeric: tabular-nums;
+    line-height: 1.1;
+}
+
+.combined-today-breakdown {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 14px;
+    color: var(--text-secondary);
+    font-size: 0.82rem;
+}
+
+.combined-today-part {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.combined-today-dot {
+    width: 9px;
+    height: 9px;
+    border-radius: 50%;
+    display: inline-block;
+}
+
+.combined-today-dot--immersion {
+    background: var(--accent-blue, #4f8cff);
+}
+
+.combined-today-dot--apps {
+    background: var(--accent-green, #39c07a);
+}
+
 @media (max-width: 520px) {
     .tracked-apps-view {
         padding: 16px;

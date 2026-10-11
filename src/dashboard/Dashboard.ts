@@ -13,6 +13,7 @@ import {
 } from '../api';
 import type { DashboardGroupBy } from '../types';
 import { StatsCard } from './StatsCard';
+import { CombinedTodayCard } from '../tracked_apps/CombinedTodayCard';
 import { Heatmap, type HeatmapHost } from './cards/Heatmap';
 import { ActivityFlow } from './cards/ActivityFlow';
 import { ActivityMix } from './cards/ActivityMix';
@@ -79,6 +80,7 @@ export class Dashboard extends Component<DashboardState> {
     private controlsHost: HTMLElement | null = null;
     private heatmapComponent: Heatmap | null = null;
     private statsComponent: StatsCard | null = null;
+    private combinedTodayCard: CombinedTodayCard | null = null;
     private quickLogComponent: QuickLog | null = null;
     private weekdayRhythmComponent: WeekdayRhythm | null = null;
     private periodStatsComponent: PeriodStats | null = null;
@@ -135,6 +137,9 @@ export class Dashboard extends Component<DashboardState> {
      */
     async loadData(): Promise<void> {
         this.render();
+        // Combined "Japanese time today" loads independently of the main
+        // snapshot so it can't delay the rest of the dashboard.
+        this.combinedTodayCard?.refresh();
         const generation = ++this.dataGeneration;
         const requestId = this.nextRequestId();
         this.activeSnapshotRequest = requestId;
@@ -223,6 +228,10 @@ export class Dashboard extends Component<DashboardState> {
             this.containers.leftColumn = html`<div id="dashboard-left-column"></div>`;
             dashboardColumns.appendChild(this.containers.leftColumn);
             this.containers.leftColumn.appendChild(this.createSidePanelToggle());
+            const combinedTodayHost = html`<div id="combined-today-container"></div>`;
+            this.containers.leftColumn.appendChild(combinedTodayHost);
+            this.combinedTodayCard = new CombinedTodayCard(combinedTodayHost);
+            this.combinedTodayCard.render();
             this.containers.stats = this.createStageContainer('stats-box-container', 'Loading study stats…');
             this.containers.leftColumn.appendChild(this.containers.stats);
             this.containers.quickLog = this.createStageContainer('quick-log-container', 'Loading quick log…');
