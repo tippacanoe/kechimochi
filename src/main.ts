@@ -2,6 +2,7 @@ import { Dashboard } from './dashboard/Dashboard';
 import { MediaView } from './media/MediaView';
 import { ProfileView } from './profile/ProfileView';
 import { TimelineView } from './timeline/TimelineView';
+import { TrackedAppsView } from './tracked_apps/TrackedAppsView';
 import {
     initializeUserDb,
     getUsername,
@@ -157,6 +158,7 @@ export class App {
     private readonly dashboard: Dashboard;
     private readonly mediaView: MediaView;
     private readonly timelineView: TimelineView;
+    private readonly appsView: TrackedAppsView;
     private readonly profileView: ProfileView;
     private readonly updateManager: UpdateManager;
     private readonly appRoot: HTMLElement;
@@ -165,6 +167,7 @@ export class App {
     private readonly dashboardContainer: HTMLElement;
     private readonly mediaContainer: HTMLElement;
     private readonly timelineContainer: HTMLElement;
+    private readonly appsContainer: HTMLElement;
     private readonly profileContainer: HTMLElement;
 
     private readonly navUserNameEl: HTMLElement;
@@ -216,6 +219,9 @@ export class App {
         this.timelineContainer.classList.add('timeline-view-container');
         this.timelineContainer.style.height = '100%';
         this.timelineContainer.style.display = 'none';
+        this.appsContainer = document.createElement('div');
+        this.appsContainer.style.height = '100%';
+        this.appsContainer.style.display = 'none';
         this.profileContainer = document.createElement('div');
         this.profileContainer.style.height = '100%';
         this.profileContainer.style.display = 'none';
@@ -223,11 +229,13 @@ export class App {
         this.viewContainer.appendChild(this.dashboardContainer);
         this.viewContainer.appendChild(this.mediaContainer);
         this.viewContainer.appendChild(this.timelineContainer);
+        this.viewContainer.appendChild(this.appsContainer);
         this.viewContainer.appendChild(this.profileContainer);
 
         this.dashboard = new Dashboard(this.dashboardContainer);
         this.mediaView = new MediaView(this.mediaContainer);
         this.timelineView = new TimelineView(this.timelineContainer);
+        this.appsView = new TrackedAppsView(this.appsContainer);
         this.profileView = new ProfileView(this.profileContainer, this.updateManager);
 
         this.updateManager.subscribe(state => {
@@ -543,6 +551,7 @@ export class App {
             }
         } else {
             if (view === 'profile') await this.profileView.loadData();
+            else if (view === 'apps') await this.appsView.loadData();
             this.renderCurrentView();
         }
     }
@@ -651,9 +660,11 @@ export class App {
         this.dashboardContainer.style.display = this.currentView === VIEW_NAMES.DASHBOARD ? 'block' : 'none';
         this.mediaContainer.style.display = this.currentView === VIEW_NAMES.MEDIA ? 'block' : 'none';
         this.timelineContainer.style.display = this.currentView === VIEW_NAMES.TIMELINE ? 'flex' : 'none';
+        this.appsContainer.style.display = this.currentView === VIEW_NAMES.APPS ? 'block' : 'none';
         this.profileContainer.style.display = this.currentView === VIEW_NAMES.PROFILE ? 'block' : 'none';
         this.viewContainer.classList.toggle('is-timeline-view', this.currentView === VIEW_NAMES.TIMELINE);
 
+        if (this.currentView === VIEW_NAMES.APPS) this.appsView.render();
         if (this.currentView === VIEW_NAMES.DASHBOARD) this.dashboard.render();
         else if (
             this.currentView === VIEW_NAMES.MEDIA

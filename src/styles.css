@@ -2,6 +2,7 @@
 @import './dashboard/dashboard.css';
 @import './calendar/calendar.css';
 @import './popups/popups.css';
+@import './tracked_apps/tracked_apps.css';
 
 :root {
   /* Layout & Utilities (Common across themes) */
