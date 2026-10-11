@@ -40,6 +40,7 @@ use models::{
     LibrarySnapshot, LibrarySnapshotRequest, Media, Milestone, ProfilePicture, TimelineBucketPage,
     TimelineBucketRequest, TimelineEvent, TimelinePage, TimelinePageRequest,
 };
+use tracked_app_time::{AppDailyTotal, TrackedApp, UsageEntry};
 
 // Database state
 pub struct DbState {
@@ -825,6 +826,118 @@ fn get_logs(state: State<DbState>) -> Result<Vec<ActivitySummary>, String> {
 fn get_heatmap(state: State<DbState>) -> Result<Vec<DailyHeatmap>, String> {
     with_conn(&state, |conn| {
         db::get_heatmap(conn).map_err(|e| e.to_string())
+    })
+}
+
+// --- Tracked App Time (soft-fork feature) ----------------------------------
+// Thin command wrappers over the isolated `tracked_app_time` data layer. Reads
+// use `with_conn`; mutations use `run_dirty_command` so cloud sync picks them up.
+
+#[tauri::command]
+fn get_tracked_apps(
+    state: State<DbState>,
+    include_archived: bool,
+) -> Result<Vec<TrackedApp>, String> {
+    with_conn(&state, |conn| {
+        tracked_app_time::get_tracked_apps(conn, include_archived).map_err(|e| e.to_string())
+    })
+}
+
+#[tauri::command]
+fn add_tracked_app(
+    app_handle: tauri::AppHandle,
+    state: State<DbState>,
+    app: TrackedApp,
+) -> Result<i64, String> {
+    run_dirty_command(&app_handle, &state, |conn| {
+        tracked_app_time::add_tracked_app(conn, &app).map_err(|e| e.to_string())
+    })
+}
+
+#[tauri::command]
+fn update_tracked_app(
+    app_handle: tauri::AppHandle,
+    state: State<DbState>,
+    app: TrackedApp,
+) -> Result<(), String> {
+    run_dirty_command(&app_handle, &state, |conn| {
+        tracked_app_time::update_tracked_app(conn, &app).map_err(|e| e.to_string())
+    })
+}
+
+#[tauri::command]
+fn set_tracked_app_archived(
+    app_handle: tauri::AppHandle,
+    state: State<DbState>,
+    id: i64,
+    archived: bool,
+) -> Result<(), String> {
+    run_dirty_command(&app_handle, &state, |conn| {
+        tracked_app_time::set_tracked_app_archived(conn, id, archived).map_err(|e| e.to_string())
+    })
+}
+
+#[tauri::command]
+fn add_usage_entry(
+    app_handle: tauri::AppHandle,
+    state: State<DbState>,
+    entry: UsageEntry,
+) -> Result<i64, String> {
+    run_dirty_command(&app_handle, &state, |conn| {
+        tracked_app_time::add_usage_entry(conn, &entry).map_err(|e| e.to_string())
+    })
+}
+
+#[tauri::command]
+fn set_usage_entry_adjustment(
+    app_handle: tauri::AppHandle,
+    state: State<DbState>,
+    id: i64,
+    adjustment: Option<i64>,
+) -> Result<(), String> {
+    run_dirty_command(&app_handle, &state, |conn| {
+        tracked_app_time::set_usage_entry_adjustment(conn, id, adjustment)
+            .map_err(|e| e.to_string())
+    })
+}
+
+#[tauri::command]
+fn delete_usage_entry(
+    app_handle: tauri::AppHandle,
+    state: State<DbState>,
+    id: i64,
+) -> Result<(), String> {
+    run_dirty_command(&app_handle, &state, |conn| {
+        tracked_app_time::delete_usage_entry(conn, id).map_err(|e| e.to_string())
+    })
+}
+
+#[tauri::command]
+fn get_usage_entries_for_day(
+    state: State<DbState>,
+    tracked_app_uid: String,
+    date: String,
+) -> Result<Vec<UsageEntry>, String> {
+    with_conn(&state, |conn| {
+        tracked_app_time::get_usage_entries_for_day(conn, &tracked_app_uid, &date)
+            .map_err(|e| e.to_string())
+    })
+}
+
+#[tauri::command]
+fn get_tracked_app_daily_totals(
+    state: State<DbState>,
+    date: String,
+) -> Result<Vec<AppDailyTotal>, String> {
+    with_conn(&state, |conn| {
+        tracked_app_time::get_tracked_app_daily_totals(conn, &date).map_err(|e| e.to_string())
+    })
+}
+
+#[tauri::command]
+fn get_tracked_app_total_minutes(state: State<DbState>, date: String) -> Result<i64, String> {
+    with_conn(&state, |conn| {
+        tracked_app_time::get_tracked_app_total_minutes(conn, &date).map_err(|e| e.to_string())
     })
 }
 
@@ -1956,6 +2069,16 @@ pub fn run() {
             save_local_http_api_config,
             set_setting,
             get_setting,
+            get_tracked_apps,
+            add_tracked_app,
+            update_tracked_app,
+            set_tracked_app_archived,
+            add_usage_entry,
+            set_usage_entry_adjustment,
+            delete_usage_entry,
+            get_usage_entries_for_day,
+            get_tracked_app_daily_totals,
+            get_tracked_app_total_minutes,
             backup::export_full_backup,
             backup::import_full_backup
         ])
