@@ -17,7 +17,7 @@ use axum::{
     http::{header, HeaderMap, Request, StatusCode},
     middleware::{self, Next},
     response::{IntoResponse, Response},
-    routing::{any, get, post, put},
+    routing::{any, delete, get, post, put},
     Json, Router,
 };
 use serde::Deserialize;
@@ -30,7 +30,7 @@ use tower_http::cors::{Any, CorsLayer};
 use kechimochi_lib::{
     csv_import, dashboard_data, database_recovery, db, get_username_logic, instance_lock,
     library_data, models, profile_picture, read_performance, remote_fetch, sync_state,
-    timeline_data,
+    timeline_data, tracked_app_time,
 };
 
 // ── Error handling ────────────────────────────────────────────────────────────
@@ -286,6 +286,33 @@ fn build_app_router(state: Shared) -> Router {
         )
         // Settings
         .route("/api/settings/:key", get(get_setting).put(set_setting))
+        // Tracked App Time (soft-fork feature)
+        .route(
+            "/api/tracked-apps",
+            get(get_tracked_apps_handler).post(add_tracked_app_handler),
+        )
+        .route("/api/tracked-apps/:id", put(update_tracked_app_handler))
+        .route(
+            "/api/tracked-apps/:id/archive",
+            post(set_tracked_app_archived_handler),
+        )
+        .route(
+            "/api/usage-entries",
+            get(get_usage_entries_handler).post(add_usage_entry_handler),
+        )
+        .route("/api/usage-entries/:id", delete(delete_usage_entry_handler))
+        .route(
+            "/api/usage-entries/:id/adjustment",
+            post(set_usage_entry_adjustment_handler),
+        )
+        .route(
+            "/api/tracked-app-totals/daily",
+            get(get_tracked_app_daily_totals_handler),
+        )
+        .route(
+            "/api/tracked-app-totals/minutes",
+            get(get_tracked_app_total_minutes_handler),
+        )
         // Utility
         .route("/api/username", get(get_username))
         .route("/api/version", get(get_version))
@@ -668,6 +695,157 @@ async fn delete_log_handler(
 async fn get_heatmap(State(s): State<Shared>) -> HandlerResult<Json<Vec<models::DailyHeatmap>>> {
     let conn = s.conn.lock().await;
     db::get_heatmap(&conn).ae().map(Json)
+}
+
+// ── Tracked App Time handlers (soft-fork feature) ───────────────────────────
+
+fn map_tracked_app_write_error(error: rusqlite::Error) -> AppError {
+    let message = error.to_string();
+    if message.contains("cannot be blank")
+        || message.contains("requires an id")
+        || message.contains("not found")
+        || message.contains("must be between")
+        || message.contains("must be YYYY-MM-DD")
+        || message.contains("references unknown")
+        || message.contains("Unknown usage")
+        || message.contains("requires a tracked app")
+    {
+        AppError::BadRequest(message)
+    } else {
+        AppError::Internal(message)
+    }
+}
+
+#[derive(Deserialize)]
+struct TrackedAppsQuery {
+    #[serde(default)]
+    include_archived: bool,
+}
+
+#[derive(Deserialize)]
+struct UsageEntriesQuery {
+    tracked_app_uid: String,
+    date: String,
+}
+
+#[derive(Deserialize)]
+struct TrackedAppDateQuery {
+    date: String,
+}
+
+#[derive(Deserialize)]
+struct ArchiveBody {
+    archived: bool,
+}
+
+#[derive(Deserialize)]
+struct AdjustmentBody {
+    #[serde(default)]
+    adjustment: Option<i64>,
+}
+
+async fn get_tracked_apps_handler(
+    State(s): State<Shared>,
+    Query(params): Query<TrackedAppsQuery>,
+) -> HandlerResult<Json<Vec<tracked_app_time::TrackedApp>>> {
+    let conn = s.conn.lock().await;
+    tracked_app_time::get_tracked_apps(&conn, params.include_archived)
+        .ae()
+        .map(Json)
+}
+
+async fn add_tracked_app_handler(
+    State(s): State<Shared>,
+    Json(app): Json<tracked_app_time::TrackedApp>,
+) -> HandlerResult<Json<i64>> {
+    let conn = s.conn.lock().await;
+    tracked_app_time::add_tracked_app(&conn, &app)
+        .map_err(map_tracked_app_write_error)
+        .map(Json)
+}
+
+async fn update_tracked_app_handler(
+    State(s): State<Shared>,
+    Path(id): Path<i64>,
+    Json(mut app): Json<tracked_app_time::TrackedApp>,
+) -> HandlerResult<Json<()>> {
+    app.id = Some(id);
+    let conn = s.conn.lock().await;
+    tracked_app_time::update_tracked_app(&conn, &app)
+        .map_err(map_tracked_app_write_error)
+        .map(|_| Json(()))
+}
+
+async fn set_tracked_app_archived_handler(
+    State(s): State<Shared>,
+    Path(id): Path<i64>,
+    Json(body): Json<ArchiveBody>,
+) -> HandlerResult<Json<()>> {
+    let conn = s.conn.lock().await;
+    tracked_app_time::set_tracked_app_archived(&conn, id, body.archived)
+        .map_err(map_tracked_app_write_error)
+        .map(|_| Json(()))
+}
+
+async fn get_usage_entries_handler(
+    State(s): State<Shared>,
+    Query(params): Query<UsageEntriesQuery>,
+) -> HandlerResult<Json<Vec<tracked_app_time::UsageEntry>>> {
+    let conn = s.conn.lock().await;
+    tracked_app_time::get_usage_entries_for_day(&conn, &params.tracked_app_uid, &params.date)
+        .ae()
+        .map(Json)
+}
+
+async fn add_usage_entry_handler(
+    State(s): State<Shared>,
+    Json(entry): Json<tracked_app_time::UsageEntry>,
+) -> HandlerResult<Json<i64>> {
+    let conn = s.conn.lock().await;
+    tracked_app_time::add_usage_entry(&conn, &entry)
+        .map_err(map_tracked_app_write_error)
+        .map(Json)
+}
+
+async fn set_usage_entry_adjustment_handler(
+    State(s): State<Shared>,
+    Path(id): Path<i64>,
+    Json(body): Json<AdjustmentBody>,
+) -> HandlerResult<Json<()>> {
+    let conn = s.conn.lock().await;
+    tracked_app_time::set_usage_entry_adjustment(&conn, id, body.adjustment)
+        .map_err(map_tracked_app_write_error)
+        .map(|_| Json(()))
+}
+
+async fn delete_usage_entry_handler(
+    State(s): State<Shared>,
+    Path(id): Path<i64>,
+) -> HandlerResult<Json<()>> {
+    let conn = s.conn.lock().await;
+    tracked_app_time::delete_usage_entry(&conn, id)
+        .map_err(map_tracked_app_write_error)
+        .map(|_| Json(()))
+}
+
+async fn get_tracked_app_daily_totals_handler(
+    State(s): State<Shared>,
+    Query(params): Query<TrackedAppDateQuery>,
+) -> HandlerResult<Json<Vec<tracked_app_time::AppDailyTotal>>> {
+    let conn = s.conn.lock().await;
+    tracked_app_time::get_tracked_app_daily_totals(&conn, &params.date)
+        .ae()
+        .map(Json)
+}
+
+async fn get_tracked_app_total_minutes_handler(
+    State(s): State<Shared>,
+    Query(params): Query<TrackedAppDateQuery>,
+) -> HandlerResult<Json<i64>> {
+    let conn = s.conn.lock().await;
+    tracked_app_time::get_tracked_app_total_minutes(&conn, &params.date)
+        .ae()
+        .map(Json)
 }
 
 async fn get_dashboard_snapshot_handler(
