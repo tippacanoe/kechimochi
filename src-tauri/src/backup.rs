@@ -930,6 +930,86 @@ mod tests {
     }
 
     #[test]
+    fn test_full_backup_round_trips_tracked_app_time() {
+        use crate::tracked_app_time::{self, TrackedApp, UsageEntry};
+
+        let source_dir = unique_temp_dir("backup_tat_src");
+        fs::create_dir_all(&source_dir).unwrap();
+        let source_conn = db::init_db(source_dir.clone(), None).unwrap();
+        tracked_app_time::add_tracked_app(
+            &source_conn,
+            &TrackedApp {
+                id: None,
+                uid: None,
+                display_name: "AnkiDroid".to_string(),
+                android_package_name: Some("com.ichi2.anki".to_string()),
+                icon: None,
+                auto_tracking_enabled: true,
+                manual_entry_enabled: true,
+                created_at: None,
+                archived: false,
+            },
+        )
+        .unwrap();
+        let app_uid = tracked_app_time::get_tracked_apps(&source_conn, false).unwrap()[0]
+            .uid
+            .clone()
+            .unwrap();
+        tracked_app_time::add_usage_entry(
+            &source_conn,
+            &UsageEntry {
+                id: None,
+                uid: None,
+                tracked_app_uid: app_uid,
+                date: "2026-10-11".to_string(),
+                minutes: 42,
+                source: "manual".to_string(),
+                platform: "desktop".to_string(),
+                manual_adjustment_minutes: None,
+                created_at: None,
+                updated_at: None,
+                device_id: None,
+            },
+        )
+        .unwrap();
+
+        let zip_path = source_dir.join("backup.zip");
+        export_full_backup_internal(
+            &source_dir,
+            &source_conn,
+            zip_path.to_str().unwrap(),
+            "{}",
+            "1.0.0",
+        )
+        .unwrap();
+        drop(source_conn);
+
+        // Restore into a fresh install and confirm the new tables came along
+        // with the whole-database snapshot (spec §7, verified rather than assumed).
+        let target_dir = unique_temp_dir("backup_tat_dst");
+        fs::create_dir_all(&target_dir).unwrap();
+        let mut target_conn = db::init_db(target_dir.clone(), None).unwrap();
+        assert!(tracked_app_time::get_tracked_apps(&target_conn, false)
+            .unwrap()
+            .is_empty());
+
+        import_full_backup_internal(&target_dir, &mut target_conn, zip_path.to_str().unwrap())
+            .unwrap();
+
+        let apps = tracked_app_time::get_tracked_apps(&target_conn, false).unwrap();
+        assert_eq!(apps.len(), 1);
+        assert_eq!(apps[0].display_name, "AnkiDroid");
+        assert_eq!(
+            tracked_app_time::get_tracked_app_total_minutes(&target_conn, "2026-10-11").unwrap(),
+            42
+        );
+
+        drop(target_conn);
+        fs::remove_dir_all(source_dir).ok();
+        fs::remove_dir_all(target_dir).ok();
+    }
+
+    #[test]
     fn test_export_full_backup_writes_manifest() {
         let data_dir = unique_temp_dir("backup_export");
         fs::create_dir_all(&data_dir).unwrap();

@@ -66,6 +66,14 @@ pub struct SyncSnapshot {
     pub settings: BTreeMap<String, SnapshotSettingValue>,
     pub profile_picture: Option<SnapshotProfilePicture>,
     pub tombstones: Vec<SnapshotTombstone>,
+    /// Tracked App Time: identity/config records, keyed by uid. `default` so
+    /// snapshots written before this feature deserialize to an empty map.
+    #[serde(default)]
+    pub tracked_apps: BTreeMap<String, SnapshotTrackedApp>,
+    /// Tracked App Time: keep-all usage contributions. `default` for the same
+    /// backward-compatibility reason as `tracked_apps`.
+    #[serde(default)]
+    pub usage_entries: Vec<SnapshotUsageEntry>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -143,6 +151,44 @@ pub struct SnapshotTombstone {
     pub media_uid: String,
     pub deleted_at: String,
     pub deleted_by_device_id: String,
+}
+
+/// A tracked app in a sync snapshot (spec Tracked App Time feature). Synced as a
+/// small identity/config record with last-writer-wins metadata — the same tier
+/// as settings. The content fields mirror the `tracked_apps` table;
+/// `updated_at`/`updated_by_device_id` are derived at build time (carried from
+/// the base snapshot when content is unchanged), exactly like media aggregates.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SnapshotTrackedApp {
+    pub uid: String,
+    pub display_name: String,
+    #[serde(default)]
+    pub android_package_name: Option<String>,
+    #[serde(default)]
+    pub icon: Option<String>,
+    pub auto_tracking_enabled: bool,
+    pub manual_entry_enabled: bool,
+    pub created_at: String,
+    pub archived: bool,
+    pub updated_at: String,
+    pub updated_by_device_id: String,
+}
+
+/// A usage entry in a sync snapshot. Synced as a keep-all contribution keyed by
+/// `uid`: distinct entries always coexist and the daily total is summed on read
+/// (spec §3.4). Only logical content is carried — local bookkeeping
+/// (`created_at`/`updated_at`/`device_id`) is intentionally excluded so an
+/// identical contribution collected on two devices compares equal.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
+pub struct SnapshotUsageEntry {
+    pub uid: String,
+    pub tracked_app_uid: String,
+    pub date: String,
+    pub minutes: i64,
+    pub source: String,
+    pub platform: String,
+    #[serde(default)]
+    pub manual_adjustment_minutes: Option<i64>,
 }
 
 #[derive(Debug, Clone)]
@@ -355,6 +401,60 @@ where
     let mut tombstones = options.tombstones.to_vec();
     tombstones.sort();
 
+    // Tracked App Time: identity records carry last-writer-wins metadata derived
+    // the same way media aggregates do — keep the base metadata when content is
+    // unchanged, otherwise stamp this sync operation.
+    let mut tracked_apps = BTreeMap::new();
+    for app in crate::tracked_app_time::get_tracked_apps(conn, true).map_err(|e| e.to_string())? {
+        let uid = app
+            .uid
+            .clone()
+            .ok_or_else(|| format!("Tracked app '{}' is missing a sync uid", app.display_name))?;
+        let mut snap = SnapshotTrackedApp {
+            uid: uid.clone(),
+            display_name: app.display_name,
+            android_package_name: app.android_package_name,
+            icon: app.icon,
+            auto_tracking_enabled: app.auto_tracking_enabled,
+            manual_entry_enabled: app.manual_entry_enabled,
+            created_at: app.created_at.unwrap_or_default(),
+            archived: app.archived,
+            updated_at: String::new(),
+            updated_by_device_id: String::new(),
+        };
+        if let Some(base) = options
+            .base_snapshot
+            .and_then(|snapshot| snapshot.tracked_apps.get(&uid))
+            .filter(|base| tracked_app_content_eq(&snap, base))
+        {
+            snap.updated_at = base.updated_at.clone();
+            snap.updated_by_device_id = base.updated_by_device_id.clone();
+        } else {
+            snap.updated_at = options.created_at.to_string();
+            snap.updated_by_device_id = options.created_by_device_id.to_string();
+        }
+        tracked_apps.insert(uid, snap);
+    }
+
+    // Usage entries are keep-all contributions; only logical content is carried.
+    let mut usage_entries = Vec::new();
+    for entry in crate::tracked_app_time::all_usage_entries(conn).map_err(|e| e.to_string())? {
+        let uid = entry
+            .uid
+            .clone()
+            .ok_or_else(|| "Usage entry is missing a sync uid".to_string())?;
+        usage_entries.push(SnapshotUsageEntry {
+            uid,
+            tracked_app_uid: entry.tracked_app_uid,
+            date: entry.date,
+            minutes: entry.minutes,
+            source: entry.source,
+            platform: entry.platform,
+            manual_adjustment_minutes: entry.manual_adjustment_minutes,
+        });
+    }
+    usage_entries.sort_by(usage_entry_sort_key);
+
     Ok(SyncSnapshot {
         sync_protocol_version: SYNC_PROTOCOL_VERSION,
         db_schema_version: db::CURRENT_SCHEMA_VERSION,
@@ -370,6 +470,8 @@ where
         settings,
         profile_picture,
         tombstones,
+        tracked_apps,
+        usage_entries,
     })
 }
 
@@ -599,6 +701,7 @@ fn apply_snapshot_inner(
         .map_err(|e| e.to_string())?;
     conn.execute("DELETE FROM shared.media", [])
         .map_err(|e| e.to_string())?;
+    crate::tracked_app_time::clear_for_sync_apply(conn).map_err(|e| e.to_string())?;
 
     for key in SYNCABLE_SETTING_KEYS {
         conn.execute("DELETE FROM main.settings WHERE key = ?1", params![key])
@@ -702,6 +805,58 @@ fn apply_snapshot_inner(
         }
     }
 
+    // Tracked App Time. Insert apps before their usage entries so the validating
+    // writer's parent-exists check passes. Keys must match the record uid, like
+    // the library above.
+    for (uid, app) in &snapshot.tracked_apps {
+        if uid != &app.uid {
+            return Err(format!(
+                "Snapshot tracked_apps key '{}' does not match record uid '{}'",
+                uid, app.uid
+            ));
+        }
+        crate::tracked_app_time::add_tracked_app_with_uid(
+            conn,
+            &crate::tracked_app_time::TrackedApp {
+                id: None,
+                uid: Some(app.uid.clone()),
+                display_name: app.display_name.clone(),
+                android_package_name: app.android_package_name.clone(),
+                icon: app.icon.clone(),
+                auto_tracking_enabled: app.auto_tracking_enabled,
+                manual_entry_enabled: app.manual_entry_enabled,
+                created_at: Some(app.created_at.clone()),
+                archived: app.archived,
+            },
+            &app.uid,
+        )
+        .map_err(|e| e.to_string())?;
+    }
+
+    for entry in &snapshot.usage_entries {
+        // created_at/updated_at are local bookkeeping, not synced content; anchor
+        // them to the snapshot time so apply is deterministic. device_id is left
+        // null — the originating device is not carried across sync.
+        crate::tracked_app_time::add_usage_entry_with_uid(
+            conn,
+            &crate::tracked_app_time::UsageEntry {
+                id: None,
+                uid: Some(entry.uid.clone()),
+                tracked_app_uid: entry.tracked_app_uid.clone(),
+                date: entry.date.clone(),
+                minutes: entry.minutes,
+                source: entry.source.clone(),
+                platform: entry.platform.clone(),
+                manual_adjustment_minutes: entry.manual_adjustment_minutes,
+                created_at: Some(snapshot.created_at.clone()),
+                updated_at: Some(snapshot.created_at.clone()),
+                device_id: None,
+            },
+            &entry.uid,
+        )
+        .map_err(|e| e.to_string())?;
+    }
+
     Ok(())
 }
 
@@ -802,6 +957,32 @@ fn milestone_sort_key(left: &SnapshotMilestone, right: &SnapshotMilestone) -> st
         .then_with(|| left.duration.cmp(&right.duration))
         .then_with(|| left.characters.cmp(&right.characters))
         .then_with(|| left.uid.cmp(&right.uid))
+}
+
+fn usage_entry_sort_key(
+    left: &SnapshotUsageEntry,
+    right: &SnapshotUsageEntry,
+) -> std::cmp::Ordering {
+    left.tracked_app_uid
+        .cmp(&right.tracked_app_uid)
+        .then_with(|| left.date.cmp(&right.date))
+        .then_with(|| left.source.cmp(&right.source))
+        .then_with(|| left.platform.cmp(&right.platform))
+        .then_with(|| left.uid.cmp(&right.uid))
+}
+
+/// Content equality for a tracked app, ignoring the derived sync metadata
+/// (`updated_at`/`updated_by_device_id`) — used to decide whether to carry base
+/// metadata forward at build time, mirroring `media_content_eq`.
+fn tracked_app_content_eq(left: &SnapshotTrackedApp, right: &SnapshotTrackedApp) -> bool {
+    left.uid == right.uid
+        && left.display_name == right.display_name
+        && left.android_package_name == right.android_package_name
+        && left.icon == right.icon
+        && left.auto_tracking_enabled == right.auto_tracking_enabled
+        && left.manual_entry_enabled == right.manual_entry_enabled
+        && left.created_at == right.created_at
+        && left.archived == right.archived
 }
 
 fn media_content_eq(left: &SnapshotMediaAggregate, right: &SnapshotMediaAggregate) -> bool {
@@ -1560,5 +1741,108 @@ mod tests {
         assert_eq!(media_entry.variant, "");
         assert_eq!(media_entry.activities.len(), 1);
         assert_eq!(media_entry.activities[0].notes, "");
+        // Pre-feature snapshots have no tracked-app-time sections.
+        assert!(parsed.tracked_apps.is_empty());
+        assert!(parsed.usage_entries.is_empty());
+    }
+
+    #[test]
+    fn test_snapshot_round_trips_tracked_app_time() {
+        use crate::tracked_app_time::{TrackedApp, UsageEntry};
+
+        let conn = setup_test_db();
+        crate::tracked_app_time::add_tracked_app(
+            &conn,
+            &TrackedApp {
+                id: None,
+                uid: None,
+                display_name: "AnkiDroid".to_string(),
+                android_package_name: Some("com.ichi2.anki".to_string()),
+                icon: None,
+                auto_tracking_enabled: true,
+                manual_entry_enabled: true,
+                created_at: None,
+                archived: false,
+            },
+        )
+        .unwrap();
+        let app_uid = crate::tracked_app_time::get_tracked_apps(&conn, true).unwrap()[0]
+            .uid
+            .clone()
+            .unwrap();
+
+        let base_entry = UsageEntry {
+            id: None,
+            uid: None,
+            tracked_app_uid: app_uid.clone(),
+            date: "2026-10-11".to_string(),
+            minutes: 0,
+            source: "manual".to_string(),
+            platform: "desktop".to_string(),
+            manual_adjustment_minutes: None,
+            created_at: None,
+            updated_at: None,
+            device_id: None,
+        };
+        crate::tracked_app_time::add_usage_entry(
+            &conn,
+            &UsageEntry {
+                minutes: 30,
+                ..base_entry.clone()
+            },
+        )
+        .unwrap();
+        crate::tracked_app_time::add_usage_entry(
+            &conn,
+            &UsageEntry {
+                minutes: 90,
+                source: "android_auto".to_string(),
+                platform: "android".to_string(),
+                ..base_entry
+            },
+        )
+        .unwrap();
+
+        let snapshot = build_snapshot(
+            &conn,
+            SnapshotBuildOptions {
+                snapshot_id: "snap_tat",
+                created_at: "2026-10-11T12:00:00Z",
+                created_by_device_id: "dev_tat",
+                profile_id: "prof_tat",
+                base_snapshot: None,
+                tombstones: &[],
+            },
+        )
+        .unwrap();
+        assert_eq!(snapshot.tracked_apps.len(), 1);
+        assert_eq!(snapshot.usage_entries.len(), 2);
+
+        let parsed = parse_snapshot_json(&snapshot_to_canonical_json(&snapshot).unwrap()).unwrap();
+        apply_snapshot(&conn, &parsed).unwrap();
+
+        // Logical state survives the wipe-and-reinstall apply.
+        assert_eq!(
+            crate::tracked_app_time::get_tracked_app_total_minutes(&conn, "2026-10-11").unwrap(),
+            120
+        );
+        let apps = crate::tracked_app_time::get_tracked_apps(&conn, true).unwrap();
+        assert_eq!(apps.len(), 1);
+        assert_eq!(apps[0].android_package_name.as_deref(), Some("com.ichi2.anki"));
+
+        let rebuilt = build_snapshot(
+            &conn,
+            SnapshotBuildOptions {
+                snapshot_id: "snap_tat",
+                created_at: "2026-10-11T12:00:00Z",
+                created_by_device_id: "dev_tat",
+                profile_id: "prof_tat",
+                base_snapshot: None,
+                tombstones: &[],
+            },
+        )
+        .unwrap();
+        assert_eq!(rebuilt.tracked_apps, parsed.tracked_apps);
+        assert_eq!(rebuilt.usage_entries, parsed.usage_entries);
     }
 }

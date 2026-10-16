@@ -39,6 +39,10 @@ import type {
     SyncConflictResolution,
     SyncProgressUpdate,
     SyncStatus,
+    TrackedApp,
+    UsageEntry,
+    AppDailyTotal,
+    UsageRefreshOutcome,
 } from '../types';
 
 export type {
@@ -85,6 +89,10 @@ export type {
     SyncConflictResolution,
     SyncProgressUpdate,
     SyncStatus,
+    TrackedApp,
+    UsageEntry,
+    AppDailyTotal,
+    UsageRefreshOutcome,
 } from '../types';
 
 /**
@@ -181,6 +189,22 @@ export interface AppServices {
     clearMilestones(mediaUid: string): Promise<void>;
     exportMilestonesCsv(filePath: string): Promise<number>;
     importMilestonesCsv(filePath: string): Promise<number>;
+
+    // ── Tracked App Time operations (soft-fork feature) ──────────────────────
+    getTrackedApps(includeArchived: boolean): Promise<TrackedApp[]>;
+    addTrackedApp(app: TrackedApp): Promise<number>;
+    updateTrackedApp(app: TrackedApp): Promise<void>;
+    setTrackedAppArchived(id: number, archived: boolean): Promise<void>;
+    addUsageEntry(entry: UsageEntry): Promise<number>;
+    setUsageEntryAdjustment(id: number, adjustment: number | null): Promise<void>;
+    deleteUsageEntry(id: number): Promise<void>;
+    getUsageEntriesForDay(trackedAppUid: string, date: string): Promise<UsageEntry[]>;
+    getTrackedAppDailyTotals(date: string): Promise<AppDailyTotal[]>;
+    getTrackedAppTotalMinutes(date: string): Promise<number>;
+    refreshTrackedAppUsage(): Promise<UsageRefreshOutcome>;
+    openUsageAccessSettings(): Promise<void>;
+    exportTrackedAppUsageCsv(filePath: string): Promise<number>;
+    importTrackedAppUsageCsv(filePath: string): Promise<number>;
 
     // ── Report card operations ────────────────────────────────────────────────
     /** Picks a destination or triggers browser download and saves the report card PNG. */

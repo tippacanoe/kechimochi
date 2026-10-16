@@ -133,6 +133,42 @@ human-readable pair, Kechimochi links the milestone to that media using an
 internal identity that is never written to the CSV. Milestone export likewise
 derives the title and variant from the linked media entry.
 
+---
+
+## 4. Tracked App Usage
+
+Used for importing and exporting the Tracked App Time feature's usage entries —
+one row per contribution (app, day, source, platform).
+
+### Header Fields
+
+| Column Name | Description | Required | Example |
+| :--- | :--- | :--- | :--- |
+| **App** | The tracked app's display name. | Yes | AnkiDroid |
+| **Date** | The local calendar day, `YYYY-MM-DD`. | Yes | 2026-10-11 |
+| **Minutes** | Raw minutes spent that day for this contribution. | Yes | 90 |
+| **Source** | `manual` or `android_auto`. Defaults to `manual` when blank. | No | android_auto |
+| **Platform** | `android`, `desktop`, or `web`. Defaults to `desktop` when blank. | No | android |
+| **Adjustment** | Optional corrected minutes that override `Minutes` for display, leaving the raw value intact. Blank means no adjustment. | No | 15 |
+
+### Example
+```csv
+App,Date,Minutes,Source,Platform,Adjustment
+AnkiDroid,2026-10-11,90,android_auto,android,
+AnkiDroid,2026-10-11,30,manual,desktop,
+Windows Anki,2026-10-11,45,manual,desktop,15
+```
+
+Apps are identified by their exact display name, never an internal uid. On
+import, a name that matches no existing tracked app creates a new manual-only
+app; a name that matches more than one aborts the import. Each row becomes a
+distinct usage entry, so the merged daily total per app is the sum of the
+displayed values (`Adjustment` when present, otherwise `Minutes`). Like the
+other formats, the whole file is preflighted before any rows are written.
+
+Tracked App Time data is also included in the full backup/restore, which is a
+whole-database snapshot, so no separate backup step is needed.
+
 ## Variant import compatibility
 
 The variant columns are optional so CSV files exported by older Kechimochi
