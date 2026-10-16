@@ -51,6 +51,7 @@ import type {
     TrackedApp,
     UsageEntry,
     AppDailyTotal,
+    UsageRefreshOutcome,
 } from '../types';
 import { getBuildVersion } from '../app_version';
 import { getMockExternalJsonResponse } from './external_mocks';
@@ -440,6 +441,14 @@ export class WebServices implements AppServices {
     }
     getTrackedAppTotalMinutes(date: string): Promise<number> {
         return get(`/tracked-app-totals/minutes?date=${encodeURIComponent(date)}`);
+    }
+    // Automatic collection is OS-level (Android only); web mode has no per-app
+    // usage source, so report unavailable without calling the server.
+    refreshTrackedAppUsage(): Promise<UsageRefreshOutcome> {
+        return Promise.resolve({ available: false, permissionGranted: true, updatedEntries: 0 });
+    }
+    openUsageAccessSettings(): Promise<void> {
+        return Promise.resolve();
     }
 
     // ── Report card operations ────────────────────────────────────────────────

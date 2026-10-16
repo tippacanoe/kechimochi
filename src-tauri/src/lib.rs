@@ -96,6 +96,10 @@ type SyncDbConn = Arc<Mutex<Connection>>;
 
 pub struct GoogleAuthMobileState(pub Option<tauri::plugin::PluginHandle<tauri::Wry>>);
 
+/// Handle to the Android `UsageStatsPlugin` (soft-fork Tracked App Time
+/// feature). `None` on non-Android builds, where automatic collection is a noop.
+pub struct UsageStatsMobileState(pub Option<tauri::plugin::PluginHandle<tauri::Wry>>);
+
 const LOCAL_HTTP_API_CONFIG_FILE: &str = "local_http_api.json";
 const LOCAL_HTTP_API_CONFIG_MAX_BYTES: usize = 64 * 1024;
 const DEFAULT_LOCAL_HTTP_API_PORT: u16 = 3031;
@@ -195,6 +199,45 @@ struct AndroidGoogleAuthResponse {
     access_token: Option<String>,
     #[serde(default)]
     requires_interaction: bool,
+}
+
+/// Outcome of a Tracked App Time automatic-collection run, reported to the UI.
+#[derive(Debug, Serialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct UsageRefreshOutcome {
+    /// Whether automatic collection exists on this platform (Android only).
+    available: bool,
+    /// Whether the OS "Usage access" permission is currently granted.
+    permission_granted: bool,
+    /// How many per-app/day rows were written or refreshed this run.
+    updated_entries: usize,
+}
+
+#[cfg(target_os = "android")]
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct UsageStatsQueryRequest {
+    package_names: Vec<String>,
+    start_date: String,
+    end_date: String,
+}
+
+#[cfg(target_os = "android")]
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct UsageStatsDay {
+    package_name: String,
+    date: String,
+    minutes: i64,
+}
+
+#[cfg(target_os = "android")]
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct UsageStatsQueryResponse {
+    permission_granted: bool,
+    #[serde(default)]
+    usages: Vec<UsageStatsDay>,
 }
 
 fn with_conn<T, F>(state: &State<DbState>, operation: F) -> Result<T, String>
@@ -939,6 +982,137 @@ fn get_tracked_app_total_minutes(state: State<DbState>, date: String) -> Result<
     with_conn(&state, |conn| {
         tracked_app_time::get_tracked_app_total_minutes(conn, &date).map_err(|e| e.to_string())
     })
+}
+
+/// Collect Android app-usage for every auto-tracking app and upsert today's (and
+/// a short backfill window of) per-app daily totals. A noop that reports
+/// `available: false` off Android. Safe to call repeatedly — each day's row is
+/// replaced in place (spec §3.7 backfill, §4 refresh-now).
+#[tauri::command]
+async fn refresh_tracked_app_usage(
+    app_handle: tauri::AppHandle,
+    state: State<'_, DbState>,
+) -> Result<UsageRefreshOutcome, String> {
+    refresh_tracked_app_usage_impl(&app_handle, &state).await
+}
+
+/// Open the OS "Usage access" settings screen so the user can grant or restore
+/// the permission (spec §3.8). Noop off Android.
+#[tauri::command]
+async fn open_usage_access_settings(app_handle: tauri::AppHandle) -> Result<(), String> {
+    open_usage_access_settings_impl(&app_handle).await
+}
+
+#[cfg(target_os = "android")]
+async fn refresh_tracked_app_usage_impl(
+    app_handle: &tauri::AppHandle,
+    state: &State<'_, DbState>,
+) -> Result<UsageRefreshOutcome, String> {
+    let packages = with_conn(state, |conn| {
+        tracked_app_time::auto_tracking_packages(conn).map_err(|e| e.to_string())
+    })?;
+    if packages.is_empty() {
+        return Ok(UsageRefreshOutcome {
+            available: true,
+            permission_granted: true,
+            updated_entries: 0,
+        });
+    }
+
+    let device_id = sync_state::get_or_create_device_id(&db::get_data_dir(app_handle))?;
+    let usage_state = app_handle.state::<UsageStatsMobileState>();
+    let plugin = usage_state
+        .0
+        .as_ref()
+        .ok_or_else(|| "Usage access is unavailable on this Android build.".to_string())?;
+
+    let (start_date, end_date) = usage_backfill_range(USAGE_BACKFILL_DAYS);
+    let response: UsageStatsQueryResponse = plugin
+        .run_mobile_plugin(
+            "queryUsage",
+            UsageStatsQueryRequest {
+                package_names: packages.iter().map(|(_, pkg)| pkg.clone()).collect(),
+                start_date,
+                end_date,
+            },
+        )
+        .map_err(|e| e.to_string())?;
+
+    if !response.permission_granted {
+        return Ok(UsageRefreshOutcome {
+            available: true,
+            permission_granted: false,
+            updated_entries: 0,
+        });
+    }
+
+    let uid_by_package: std::collections::HashMap<String, String> = packages
+        .into_iter()
+        .map(|(uid, pkg)| (pkg, uid))
+        .collect();
+
+    let updated_entries = run_dirty_command(app_handle, state, |conn| {
+        let mut count = 0usize;
+        for day in &response.usages {
+            if let Some(app_uid) = uid_by_package.get(&day.package_name) {
+                tracked_app_time::upsert_auto_usage_entry(
+                    conn, app_uid, &day.date, day.minutes, &device_id,
+                )
+                .map_err(|e| e.to_string())?;
+                count += 1;
+            }
+        }
+        Ok(count)
+    })?;
+
+    Ok(UsageRefreshOutcome {
+        available: true,
+        permission_granted: true,
+        updated_entries,
+    })
+}
+
+#[cfg(not(target_os = "android"))]
+async fn refresh_tracked_app_usage_impl(
+    _app_handle: &tauri::AppHandle,
+    _state: &State<'_, DbState>,
+) -> Result<UsageRefreshOutcome, String> {
+    // Desktop/web never query per-app OS usage; data arrives via manual entry
+    // or sync. Report "unavailable" so the UI hides the refresh affordance.
+    Ok(UsageRefreshOutcome {
+        available: false,
+        permission_granted: true,
+        updated_entries: 0,
+    })
+}
+
+#[cfg(target_os = "android")]
+/// Number of days (including today) the collector backfills on each run. The
+/// retained `UsageStatsManager` history comfortably covers roughly a week.
+const USAGE_BACKFILL_DAYS: i64 = 8;
+
+#[cfg(target_os = "android")]
+fn usage_backfill_range(days: i64) -> (String, String) {
+    let today = chrono::Local::now().date_naive();
+    let start = today - chrono::Duration::days((days - 1).max(0));
+    (start.format("%Y-%m-%d").to_string(), today.format("%Y-%m-%d").to_string())
+}
+
+#[cfg(target_os = "android")]
+async fn open_usage_access_settings_impl(app_handle: &tauri::AppHandle) -> Result<(), String> {
+    let usage_state = app_handle.state::<UsageStatsMobileState>();
+    let plugin = usage_state
+        .0
+        .as_ref()
+        .ok_or_else(|| "Usage access is unavailable on this Android build.".to_string())?;
+    plugin
+        .run_mobile_plugin::<()>("openUsageAccessSettings", ())
+        .map_err(|e| e.to_string())
+}
+
+#[cfg(not(target_os = "android"))]
+async fn open_usage_access_settings_impl(_app_handle: &tauri::AppHandle) -> Result<(), String> {
+    Ok(())
 }
 
 #[tauri::command]
@@ -1862,6 +2036,7 @@ pub fn run() {
 
     let mut builder = tauri::Builder::default()
         .plugin(init_google_auth_mobile_plugin())
+        .plugin(init_usage_stats_mobile_plugin())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_opener::init());
@@ -2079,6 +2254,8 @@ pub fn run() {
             get_usage_entries_for_day,
             get_tracked_app_daily_totals,
             get_tracked_app_total_minutes,
+            refresh_tracked_app_usage,
+            open_usage_access_settings,
             backup::export_full_backup,
             backup::import_full_backup
         ])
@@ -2098,6 +2275,23 @@ fn init_google_auth_mobile_plugin() -> tauri::plugin::TauriPlugin<tauri::Wry> {
             let plugin = None;
 
             app.manage(GoogleAuthMobileState(plugin));
+            Ok(())
+        })
+        .build()
+}
+
+fn init_usage_stats_mobile_plugin() -> tauri::plugin::TauriPlugin<tauri::Wry> {
+    tauri::plugin::Builder::new("usageStats")
+        .setup(|app, _api| {
+            #[cfg(target_os = "android")]
+            let plugin = Some(
+                _api.register_android_plugin("com.morg.kechimochi", "UsageStatsPlugin")
+                    .map_err(|e| -> Box<dyn std::error::Error> { Box::new(e) })?,
+            );
+            #[cfg(not(target_os = "android"))]
+            let plugin = None;
+
+            app.manage(UsageStatsMobileState(plugin));
             Ok(())
         })
         .build()

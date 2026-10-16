@@ -15,6 +15,9 @@ vi.mock('../../src/api', () => ({
     getUsageEntriesForDay: vi.fn(() => Promise.resolve([])),
     getTrackedAppDailyTotals: vi.fn(),
     getTrackedAppTotalMinutes: vi.fn(),
+    refreshTrackedAppUsage: vi.fn(() =>
+        Promise.resolve({ available: false, permissionGranted: true, updatedEntries: 0 })),
+    openUsageAccessSettings: vi.fn(() => Promise.resolve()),
 }));
 
 vi.mock('../../src/modal_base', () => ({
@@ -119,5 +122,53 @@ describe('TrackedAppsView', () => {
         await view.loadData();
 
         expect(container.querySelector('.tracked-apps-empty')?.textContent).toContain('No tracked apps yet');
+    });
+
+    it('hides the refresh affordance when automatic collection is unavailable', async () => {
+        const { view, container } = mountView();
+        await view.loadData();
+        // refreshTrackedAppUsage defaults to available:false in this suite.
+        await vi.waitFor(() =>
+            expect(mockedApi.refreshTrackedAppUsage).toHaveBeenCalled(),
+        );
+        expect(container.querySelector('#tracked-apps-refresh')).toBeNull();
+        expect(container.querySelector('.tracked-apps-banner')).toBeNull();
+    });
+
+    it('shows a revoked-permission banner when usage access is unavailable', async () => {
+        mockedApi.refreshTrackedAppUsage.mockResolvedValue({
+            available: true,
+            permissionGranted: false,
+            updatedEntries: 0,
+        });
+
+        const { view, container } = mountView();
+        await view.loadData();
+
+        await vi.waitFor(() => {
+            const banner = container.querySelector('.tracked-apps-banner');
+            expect(banner?.textContent).toContain('Usage access was revoked');
+        });
+        expect(container.querySelector('#tracked-apps-refresh')).not.toBeNull();
+        container.querySelector<HTMLButtonElement>('#tracked-apps-grant')?.click();
+        await vi.waitFor(() =>
+            expect(mockedApi.openUsageAccessSettings).toHaveBeenCalled(),
+        );
+    });
+
+    it('reloads totals after a collection run writes new entries', async () => {
+        mockedApi.getTrackedAppTotalMinutes.mockResolvedValueOnce(0).mockResolvedValue(60);
+        mockedApi.refreshTrackedAppUsage.mockResolvedValue({
+            available: true,
+            permissionGranted: true,
+            updatedEntries: 3,
+        });
+
+        const { view, container } = mountView();
+        await view.loadData();
+
+        await vi.waitFor(() =>
+            expect(container.querySelector('.tracked-apps-total-value')?.textContent).toBe('1h'),
+        );
     });
 });

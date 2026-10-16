@@ -79,5 +79,7 @@ commands.allow = [
     "delete_usage_entry",
     "get_usage_entries_for_day",
     "get_tracked_app_daily_totals",
-    "get_tracked_app_total_minutes"
+    "get_tracked_app_total_minutes",
+    "refresh_tracked_app_usage",
+    "open_usage_access_settings"
 ]

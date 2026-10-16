@@ -24,6 +24,8 @@ import {
     getUsageEntriesForDay,
     getTrackedAppDailyTotals,
     getTrackedAppTotalMinutes,
+    refreshTrackedAppUsage,
+    openUsageAccessSettings,
 } from '../api';
 import type { TrackedApp, UsageEntry, AppDailyTotal, UsagePlatform } from '../types';
 
@@ -35,6 +37,9 @@ interface TrackedAppsState {
     expandedUid: string | null;
     expandedEntries: UsageEntry[];
     loading: boolean;
+    autoAvailable: boolean;
+    permissionGranted: boolean;
+    collecting: boolean;
 }
 
 export function todayLocalDate(): string {
@@ -69,10 +74,20 @@ export class TrackedAppsView extends Component<TrackedAppsState> {
             expandedUid: null,
             expandedEntries: [],
             loading: true,
+            autoAvailable: false,
+            permissionGranted: true,
+            collecting: false,
         });
     }
 
+    /** Entry point used by the shell: show stored data, then collect in the
+     *  background (Android) and refresh totals if anything changed. */
     async loadData(): Promise<void> {
+        await this.loadDisplay();
+        this.maybeCollect();
+    }
+
+    private async loadDisplay(): Promise<void> {
         try {
             const [apps, totals, totalMinutes] = await Promise.all([
                 getTrackedApps(false),
@@ -87,12 +102,48 @@ export class TrackedAppsView extends Component<TrackedAppsState> {
         this.render();
     }
 
+    /** Trigger an automatic-collection run (Android). A noop that reports
+     *  `available: false` elsewhere, in which case no refresh UI is shown. */
+    private async maybeCollect(): Promise<void> {
+        if (this.state.collecting) return;
+        this.state = { ...this.state, collecting: true };
+        this.render();
+        try {
+            const outcome = await refreshTrackedAppUsage();
+            this.state = {
+                ...this.state,
+                autoAvailable: outcome.available,
+                permissionGranted: outcome.permissionGranted,
+                collecting: false,
+            };
+            if (outcome.updatedEntries > 0) {
+                await this.loadDisplay();
+            } else {
+                this.render();
+            }
+        } catch (error) {
+            Logger.error('[tracked-apps] Automatic usage collection failed', error);
+            this.state = { ...this.state, collecting: false };
+            this.render();
+        }
+    }
+
     private totalFor(uid: string): number {
         return this.state.totals.find(total => total.tracked_app_uid === uid)?.total_minutes ?? 0;
     }
 
+    private renderRefreshButton(): HTMLElement | null {
+        if (!this.state.autoAvailable) return null;
+        const label = this.state.collecting ? 'Refreshing…' : 'Refresh now';
+        const disabledAttr = this.state.collecting ? 'disabled' : '';
+        return html`<button class="btn btn-secondary" id="tracked-apps-refresh" ${disabledAttr}>${label}</button>`;
+    }
+
     render(): void {
-        const { apps, loading, date, totalMinutes } = this.state;
+        const { apps, loading, date, totalMinutes, autoAvailable, permissionGranted } = this.state;
+
+        const refreshButton = this.renderRefreshButton();
+        const showBanner = autoAvailable && !permissionGranted;
 
         const root = html`
             <div class="tracked-apps-view">
@@ -101,8 +152,22 @@ export class TrackedAppsView extends Component<TrackedAppsState> {
                         <h1 class="tracked-apps-title">Tracked Apps</h1>
                         <p class="tracked-apps-subtitle">Time in your study apps, merged across every device.</p>
                     </div>
-                    <button class="btn btn-primary" id="tracked-apps-add">Add app</button>
+                    <div class="tracked-apps-header-actions">
+                        ${refreshButton}
+                        <button class="btn btn-primary" id="tracked-apps-add">Add app</button>
+                    </div>
                 </header>
+
+                ${
+                    showBanner
+                        ? html`
+                            <div class="tracked-apps-banner" role="alert">
+                                <span>Usage access was revoked for Kechimochi — tracked app data will stop updating until it's re-granted.</span>
+                                <button class="btn btn-secondary btn-sm" id="tracked-apps-grant">Open settings</button>
+                            </div>
+                        `
+                        : null
+                }
 
                 <section class="tracked-apps-total-card">
                     <span class="tracked-apps-total-label">App time on ${date}</span>
@@ -229,6 +294,12 @@ export class TrackedAppsView extends Component<TrackedAppsState> {
 
     private wireControls(root: HTMLElement): void {
         root.querySelector('#tracked-apps-add')?.addEventListener('click', () => this.handleAddApp());
+        root.querySelector('#tracked-apps-refresh')?.addEventListener('click', () => this.maybeCollect());
+        root.querySelector('#tracked-apps-grant')?.addEventListener('click', async () => {
+            await openUsageAccessSettings();
+            // Re-check permission when the user returns from settings.
+            await this.maybeCollect();
+        });
 
         const dateInput = root.querySelector('#tracked-apps-log-date') as HTMLInputElement | null;
         dateInput?.addEventListener('change', () => {

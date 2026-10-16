@@ -53,6 +53,7 @@ import type {
     TrackedApp,
     UsageEntry,
     AppDailyTotal,
+    UsageRefreshOutcome,
 } from '../types';
 import { getBuildVersion } from '../app_version';
 import { getMockExternalJsonResponse } from './external_mocks';
@@ -315,6 +316,12 @@ export class DesktopServices implements AppServices {
     }
     getTrackedAppTotalMinutes(date: string): Promise<number> {
         return invoke('get_tracked_app_total_minutes', { date });
+    }
+    refreshTrackedAppUsage(): Promise<UsageRefreshOutcome> {
+        return invoke('refresh_tracked_app_usage');
+    }
+    openUsageAccessSettings(): Promise<void> {
+        return invoke('open_usage_access_settings');
     }
 
     // ── Report card operations ────────────────────────────────────────────────

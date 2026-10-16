@@ -67,6 +67,7 @@ export type {
   UsageSource,
   UsagePlatform,
   AppDailyTotal,
+  UsageRefreshOutcome,
 } from './types';
 
 import type {
@@ -112,6 +113,7 @@ import type {
   TrackedApp,
   UsageEntry,
   AppDailyTotal,
+  UsageRefreshOutcome,
 } from './types';
 
 declare global {
@@ -233,6 +235,8 @@ export function deleteUsageEntry(id: number): Promise<void> { return getServices
 export function getUsageEntriesForDay(trackedAppUid: string, date: string): Promise<UsageEntry[]> { return getServices().getUsageEntriesForDay(trackedAppUid, date); }
 export function getTrackedAppDailyTotals(date: string): Promise<AppDailyTotal[]> { return getServices().getTrackedAppDailyTotals(date); }
 export function getTrackedAppTotalMinutes(date: string): Promise<number> { return getServices().getTrackedAppTotalMinutes(date); }
+export function refreshTrackedAppUsage(): Promise<UsageRefreshOutcome> { return getServices().refreshTrackedAppUsage(); }
+export function openUsageAccessSettings(): Promise<void> { return getServices().openUsageAccessSettings(); }
 
 export function getMilestones(mediaUid: string): Promise<Milestone[]> { return getServices().getMilestones(mediaUid); }
 export function addMilestone(milestone: Milestone): Promise<number> { return getServices().addMilestone(milestone); }

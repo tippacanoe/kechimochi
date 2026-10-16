@@ -42,6 +42,7 @@ import type {
     TrackedApp,
     UsageEntry,
     AppDailyTotal,
+    UsageRefreshOutcome,
 } from '../types';
 
 export type {
@@ -91,6 +92,7 @@ export type {
     TrackedApp,
     UsageEntry,
     AppDailyTotal,
+    UsageRefreshOutcome,
 } from '../types';
 
 /**
@@ -199,6 +201,8 @@ export interface AppServices {
     getUsageEntriesForDay(trackedAppUid: string, date: string): Promise<UsageEntry[]>;
     getTrackedAppDailyTotals(date: string): Promise<AppDailyTotal[]>;
     getTrackedAppTotalMinutes(date: string): Promise<number>;
+    refreshTrackedAppUsage(): Promise<UsageRefreshOutcome>;
+    openUsageAccessSettings(): Promise<void>;
 
     // ── Report card operations ────────────────────────────────────────────────
     /** Picks a destination or triggers browser download and saves the report card PNG. */

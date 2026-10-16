@@ -103,6 +103,8 @@ function createServices(): TestServices {
         getUsageEntriesForDay: vi.fn(),
         getTrackedAppDailyTotals: vi.fn(),
         getTrackedAppTotalMinutes: vi.fn(),
+        refreshTrackedAppUsage: vi.fn(),
+        openUsageAccessSettings: vi.fn(),
         saveReportCardImage: vi.fn(),
         pickAndUploadProfilePicture: vi.fn(),
         pickAndUploadCover: vi.fn(),

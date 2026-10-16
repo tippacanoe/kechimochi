@@ -156,6 +156,9 @@ export function createMainApiMock() {
         getUsageEntriesForDay: vi.fn(() => Promise.resolve([])),
         getTrackedAppDailyTotals: vi.fn(() => Promise.resolve([])),
         getTrackedAppTotalMinutes: vi.fn(() => Promise.resolve(0)),
+        refreshTrackedAppUsage: vi.fn(() =>
+            Promise.resolve({ available: false, permissionGranted: true, updatedEntries: 0 })),
+        openUsageAccessSettings: vi.fn(() => Promise.resolve()),
         getAppVersion: vi.fn(() => Promise.resolve('1.0.0')),
         isDesktop: vi.fn(() => true),
         getLocalHttpApiStatus: vi.fn(() => Promise.resolve(defaultLocalHttpApiStatus)),

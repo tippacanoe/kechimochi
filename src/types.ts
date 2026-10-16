@@ -480,6 +480,14 @@ export interface AppDailyTotal {
     total_minutes: number;
 }
 
+// Result of an Android automatic-collection run. The Rust struct uses camelCase
+// serialization, so these fields are camelCase (unlike the data structs above).
+export interface UsageRefreshOutcome {
+    available: boolean;
+    permissionGranted: boolean;
+    updatedEntries: number;
+}
+
 export interface RecoveryMilestone {
     id: number;
     name: string;

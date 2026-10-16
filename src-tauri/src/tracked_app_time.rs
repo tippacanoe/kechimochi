@@ -660,6 +660,88 @@ pub(crate) fn clear_for_sync_apply(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// Android automatic collection (Phase 4)
+// ---------------------------------------------------------------------------
+
+/// Namespace for deterministic automatic-usage uids (a fixed, feature-specific
+/// UUID). Keeping it distinct from the sync-record namespace avoids any chance
+/// of collision with activity/milestone record uids.
+const AUTO_USAGE_UID_NAMESPACE: &str = "2f1c9a84-6d0e-4b3a-9f2c-7a1e8b4d5c60";
+
+/// Deterministic uid for one device's automatically-collected entry for an
+/// app on a day. Re-collecting the same day on the same device overwrites that
+/// one row (keyed by this uid); a different device derives a different uid, so
+/// the keep-all sync merge keeps both and the daily total sums them.
+fn auto_usage_uid(tracked_app_uid: &str, date: &str, device_id: &str) -> Result<String> {
+    let namespace = Uuid::parse_str(AUTO_USAGE_UID_NAMESPACE)
+        .map_err(|error| err(format!("Invalid auto-usage namespace UUID: {error}")))?;
+    // Unit separators keep the fields unambiguous in the hashed payload.
+    let payload = format!("{tracked_app_uid}\u{1f}{date}\u{1f}{device_id}");
+    Ok(Uuid::new_v5(&namespace, payload.as_bytes()).to_string())
+}
+
+/// Record (or refresh) an automatically-collected daily total for one app on one
+/// day, as measured by `device_id`. Idempotent per (app, day, device): a later
+/// collection run updates the raw `minutes` in place and never stacks duplicate
+/// rows, while any user `manual_adjustment_minutes` on that row is preserved.
+pub fn upsert_auto_usage_entry(
+    conn: &Connection,
+    tracked_app_uid: &str,
+    date: &str,
+    minutes: i64,
+    device_id: &str,
+) -> Result<()> {
+    let app_uid = tracked_app_uid.trim();
+    if app_uid.is_empty() {
+        return Err(err("Usage entry requires a tracked app"));
+    }
+    if !tracked_app_exists(conn, app_uid)? {
+        return Err(err(format!(
+            "Usage entry references unknown tracked app '{app_uid}'"
+        )));
+    }
+    validate_local_day(date)?;
+    if !(0..=MAX_USAGE_MINUTES).contains(&minutes) {
+        return Err(err(format!(
+            "Usage entry minutes must be between 0 and {MAX_USAGE_MINUTES}"
+        )));
+    }
+    let device = device_id.trim();
+    if device.is_empty() {
+        return Err(err("Automatic usage entry requires a device id"));
+    }
+    let uid = auto_usage_uid(app_uid, date.trim(), device)?;
+    let now = now_rfc3339();
+    conn.execute(
+        "INSERT INTO main.usage_entries
+             (uid, tracked_app_uid, date, minutes, source, platform,
+              manual_adjustment_minutes, created_at, updated_at, device_id)
+         VALUES (?1, ?2, ?3, ?4, 'android_auto', 'android', NULL, ?5, ?5, ?6)
+         ON CONFLICT(uid) DO UPDATE SET
+             minutes = excluded.minutes,
+             updated_at = excluded.updated_at",
+        params![uid, app_uid, date.trim(), minutes, now, device],
+    )?;
+    Ok(())
+}
+
+/// The (uid, android_package_name) of every non-archived app with Android
+/// automatic tracking enabled and a real package name — the set the collector
+/// queries `UsageStatsManager` for.
+pub fn auto_tracking_packages(conn: &Connection) -> Result<Vec<(String, String)>> {
+    let mut stmt = conn.prepare(
+        "SELECT uid, android_package_name FROM main.tracked_apps
+         WHERE auto_tracking_enabled = 1
+           AND archived = 0
+           AND android_package_name IS NOT NULL
+           AND TRIM(android_package_name) <> ''
+         ORDER BY uid ASC",
+    )?;
+    let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
+    rows.collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -898,6 +980,70 @@ mod tests {
         let mut bad_source = manual_entry(&app_uid, "2026-10-11", 10);
         bad_source.source = "guess".to_string();
         assert!(add_usage_entry(&conn, &bad_source).is_err());
+    }
+
+    #[test]
+    fn upsert_auto_usage_replaces_in_place_and_keeps_adjustments() {
+        let conn = ready_bundle();
+        let app_id = add_tracked_app(&conn, &sample_app("AnkiDroid")).unwrap();
+        let app_uid = uid_of(&conn, app_id);
+
+        // First collection run from this device.
+        upsert_auto_usage_entry(&conn, &app_uid, "2026-10-11", 40, "dev-A").unwrap();
+        assert_eq!(get_tracked_app_total_minutes(&conn, "2026-10-11").unwrap(), 40);
+        assert_eq!(get_usage_entries_for_day(&conn, &app_uid, "2026-10-11").unwrap().len(), 1);
+
+        // A later run the same day replaces the row rather than stacking.
+        upsert_auto_usage_entry(&conn, &app_uid, "2026-10-11", 55, "dev-A").unwrap();
+        let entries = get_usage_entries_for_day(&conn, &app_uid, "2026-10-11").unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].minutes, 55);
+
+        // A user adjustment survives the next collection run.
+        set_usage_entry_adjustment(&conn, entries[0].id.unwrap(), Some(20)).unwrap();
+        upsert_auto_usage_entry(&conn, &app_uid, "2026-10-11", 60, "dev-A").unwrap();
+        let after = get_usage_entries_for_day(&conn, &app_uid, "2026-10-11").unwrap();
+        assert_eq!(after.len(), 1);
+        assert_eq!(after[0].minutes, 60);
+        assert_eq!(after[0].manual_adjustment_minutes, Some(20));
+        // Displayed total uses the adjustment, not the raw minutes.
+        assert_eq!(get_tracked_app_total_minutes(&conn, "2026-10-11").unwrap(), 20);
+
+        // A different device is a separate contribution that coexists and sums.
+        set_usage_entry_adjustment(&conn, after[0].id.unwrap(), None).unwrap();
+        upsert_auto_usage_entry(&conn, &app_uid, "2026-10-11", 15, "dev-B").unwrap();
+        assert_eq!(get_usage_entries_for_day(&conn, &app_uid, "2026-10-11").unwrap().len(), 2);
+        assert_eq!(get_tracked_app_total_minutes(&conn, "2026-10-11").unwrap(), 75);
+    }
+
+    #[test]
+    fn auto_tracking_packages_lists_only_eligible_apps() {
+        let conn = ready_bundle();
+        let mut anki = sample_app("AnkiDroid");
+        anki.auto_tracking_enabled = true;
+        anki.android_package_name = Some("com.ichi2.anki".to_string());
+        add_tracked_app(&conn, &anki).unwrap();
+        // Manual-only desktop app: no package, not auto-tracked.
+        add_tracked_app(&conn, &sample_app("Windows Anki")).unwrap();
+        // Auto-enabled but archived -> excluded.
+        let mut archived = sample_app("Old");
+        archived.auto_tracking_enabled = true;
+        archived.android_package_name = Some("com.old.app".to_string());
+        archived.archived = true;
+        add_tracked_app(&conn, &archived).unwrap();
+
+        let packages = auto_tracking_packages(&conn).unwrap();
+        assert_eq!(packages.len(), 1);
+        assert_eq!(packages[0].1, "com.ichi2.anki");
+    }
+
+    #[test]
+    fn upsert_auto_usage_rejects_unknown_app_and_blank_device() {
+        let conn = ready_bundle();
+        let app_id = add_tracked_app(&conn, &sample_app("AnkiDroid")).unwrap();
+        let app_uid = uid_of(&conn, app_id);
+        assert!(upsert_auto_usage_entry(&conn, "ghost", "2026-10-11", 10, "dev-A").is_err());
+        assert!(upsert_auto_usage_entry(&conn, &app_uid, "2026-10-11", 10, "  ").is_err());
     }
 
     #[test]
