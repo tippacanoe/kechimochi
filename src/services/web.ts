@@ -450,6 +450,23 @@ export class WebServices implements AppServices {
     openUsageAccessSettings(): Promise<void> {
         return Promise.resolve();
     }
+    async exportTrackedAppUsageCsv(_filePath: string): Promise<number> {
+        const res = await fetch(apiUrl('/export/usage'));
+        if (!res.ok) throw new Error(await res.text());
+        const blob = await res.blob();
+        triggerDownload(blob, 'kechimochi_tracked_app_usage.csv');
+        return Number.parseInt(res.headers.get('X-Row-Count') ?? '0', 10);
+    }
+    async importTrackedAppUsageCsv(_filePath: string): Promise<number> {
+        const file = await pickFile('.csv');
+        if (!file) return 0;
+        const form = new FormData();
+        form.append('file', file);
+        const res = await fetch(apiUrl('/import/usage'), { method: 'POST', body: form });
+        if (!res.ok) throw new Error(await res.text());
+        const { count } = await res.json();
+        return count as number;
+    }
 
     // ── Report card operations ────────────────────────────────────────────────
     async saveReportCardImage(imageBlob: Blob, defaultFileName: string): Promise<boolean> {

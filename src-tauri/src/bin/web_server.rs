@@ -346,6 +346,11 @@ fn build_app_router(state: Shared) -> Router {
             post(import_milestones).layer(DefaultBodyLimit::max(CSV_IMPORT_LIMIT)),
         )
         .route("/api/export/milestones", get(export_milestones))
+        .route("/api/export/usage", get(export_usage))
+        .route(
+            "/api/import/usage",
+            post(import_usage).layer(DefaultBodyLimit::max(CSV_IMPORT_LIMIT)),
+        )
         .route(
             "/api/export/full-backup",
             post(export_full_backup_handler).layer(DefaultBodyLimit::max(FULL_BACKUP_EXPORT_LIMIT)),
@@ -1564,6 +1569,46 @@ fn tempfile_body(tmp: &tempfile::NamedTempFile) -> HandlerResult<Body> {
     Ok(Body::from_stream(ReaderStream::new(
         tokio::fs::File::from_std(file),
     )))
+}
+
+async fn export_usage(State(s): State<Shared>) -> HandlerResult<Response> {
+    let tmp = tempfile::NamedTempFile::new().ae()?;
+    let path = tmp
+        .path()
+        .to_str()
+        .ok_or_else(|| AppError::Internal("Invalid temp path".into()))?
+        .to_owned();
+    let count = {
+        let conn = s.conn.lock().await;
+        csv_import::export_tracked_app_usage_csv(&conn, &path).ae()?
+    };
+    let body = tempfile_body(&tmp)?;
+    Response::builder()
+        .header(header::CONTENT_TYPE, "text/csv; charset=utf-8")
+        .header(
+            header::CONTENT_DISPOSITION,
+            "attachment; filename=\"tracked-app-usage.csv\"",
+        )
+        .header("x-row-count", count.to_string())
+        .body(body)
+        .ae()
+}
+
+async fn import_usage(
+    State(s): State<Shared>,
+    mut multipart: Multipart,
+) -> HandlerResult<Json<serde_json::Value>> {
+    let tmp = field_to_tempfile(&mut multipart).await?;
+    let path = tmp
+        .path()
+        .to_str()
+        .ok_or_else(|| AppError::Internal("Invalid temp path".into()))?
+        .to_owned();
+    let count = {
+        let mut conn = s.conn.lock().await;
+        csv_import::import_tracked_app_usage_csv(&mut conn, &path).map_err(map_csv_import_error)?
+    };
+    Ok(Json(serde_json::json!({ "count": count })))
 }
 
 #[cfg(test)]

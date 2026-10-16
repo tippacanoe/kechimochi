@@ -726,6 +726,25 @@ pub fn upsert_auto_usage_entry(
     Ok(())
 }
 
+/// Resolve a tracked app by its exact (trimmed) display name for CSV import.
+/// `Ok(Some(uid))` for a single match, `Ok(None)` when none exists (the caller
+/// may create one), and an error when the name is ambiguous — mirroring how the
+/// CSV layer treats duplicate human-readable identities elsewhere.
+pub fn find_tracked_app_uid_by_name(conn: &Connection, display_name: &str) -> Result<Option<String>> {
+    let name = display_name.trim();
+    let mut stmt = conn.prepare("SELECT uid FROM main.tracked_apps WHERE display_name = ?1")?;
+    let uids = stmt
+        .query_map(params![name], |row| row.get::<_, String>(0))?
+        .collect::<Result<Vec<_>>>()?;
+    match uids.len() {
+        0 => Ok(None),
+        1 => Ok(uids.into_iter().next()),
+        _ => Err(err(format!(
+            "Multiple tracked apps are named '{name}'; rename one before importing"
+        ))),
+    }
+}
+
 /// The (uid, android_package_name) of every non-archived app with Android
 /// automatic tracking enabled and a real package name — the set the collector
 /// queries `UsageStatsManager` for.

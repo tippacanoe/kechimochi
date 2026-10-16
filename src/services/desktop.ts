@@ -323,6 +323,33 @@ export class DesktopServices implements AppServices {
     openUsageAccessSettings(): Promise<void> {
         return invoke('open_usage_access_settings');
     }
+    exportTrackedAppUsageCsv(filePath: string): Promise<number> {
+        if (filePath && filePath.trim().length > 0) {
+            return invoke('export_tracked_app_usage_csv', { filePath });
+        }
+        return Promise.resolve(this.getMockSavePath()).then(mockPath => {
+            if (mockPath) return mockPath;
+            return tauriSave({
+                filters: [{ name: 'CSV', extensions: ['csv'] }],
+                defaultPath: 'kechimochi_tracked_app_usage.csv',
+            });
+        }).then(savePath => {
+            if (!savePath) return 0;
+            return invoke<number>('export_tracked_app_usage_csv', { filePath: savePath });
+        });
+    }
+    importTrackedAppUsageCsv(filePath: string): Promise<number> {
+        if (filePath && filePath.trim().length > 0) {
+            return invoke('import_tracked_app_usage_csv', { filePath });
+        }
+        return Promise.resolve(this.getMockOpenPath()).then(mockPath => {
+            if (mockPath) return mockPath;
+            return tauriOpen({ multiple: false, filters: [{ name: 'CSV', extensions: ['csv'] }] });
+        }).then(selected => {
+            if (!selected || typeof selected !== 'string') return 0;
+            return invoke<number>('import_tracked_app_usage_csv', { filePath: selected });
+        });
+    }
 
     // ── Report card operations ────────────────────────────────────────────────
     async saveReportCardImage(imageBlob: Blob, defaultFileName: string): Promise<boolean> {

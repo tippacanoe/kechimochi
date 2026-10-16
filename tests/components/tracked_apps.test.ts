@@ -18,6 +18,8 @@ vi.mock('../../src/api', () => ({
     refreshTrackedAppUsage: vi.fn(() =>
         Promise.resolve({ available: false, permissionGranted: true, updatedEntries: 0 })),
     openUsageAccessSettings: vi.fn(() => Promise.resolve()),
+    exportTrackedAppUsageCsv: vi.fn(() => Promise.resolve(0)),
+    importTrackedAppUsageCsv: vi.fn(() => Promise.resolve(0)),
 }));
 
 vi.mock('../../src/modal_base', () => ({

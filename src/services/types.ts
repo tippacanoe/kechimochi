@@ -203,6 +203,8 @@ export interface AppServices {
     getTrackedAppTotalMinutes(date: string): Promise<number>;
     refreshTrackedAppUsage(): Promise<UsageRefreshOutcome>;
     openUsageAccessSettings(): Promise<void>;
+    exportTrackedAppUsageCsv(filePath: string): Promise<number>;
+    importTrackedAppUsageCsv(filePath: string): Promise<number>;
 
     // ── Report card operations ────────────────────────────────────────────────
     /** Picks a destination or triggers browser download and saves the report card PNG. */

@@ -81,5 +81,7 @@ commands.allow = [
     "get_tracked_app_daily_totals",
     "get_tracked_app_total_minutes",
     "refresh_tracked_app_usage",
-    "open_usage_access_settings"
+    "open_usage_access_settings",
+    "export_tracked_app_usage_csv",
+    "import_tracked_app_usage_csv"
 ]

@@ -10,6 +10,7 @@ use uuid::Uuid;
 
 use crate::db;
 use crate::models::{ActivityLog, Media, Milestone};
+use crate::tracked_app_time::{self, TrackedApp, UsageEntry};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use sha2::{Digest, Sha256};
 
@@ -167,6 +168,31 @@ impl MilestoneCsvRow {
         "Date",
         "Media Variant",
     ];
+}
+
+/// Tracked App Time usage CSV (soft-fork feature). Apps are identified by their
+/// human-readable display name, never an internal uid — matching the rest of
+/// the CSV boundary. `Source`/`Platform` default to a manual desktop entry when
+/// omitted; `Adjustment` is the optional display override.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(deny_unknown_fields)]
+pub struct UsageCsvRow {
+    #[serde(rename = "App")]
+    pub app: String,
+    #[serde(rename = "Date")]
+    pub date: String,
+    #[serde(rename = "Minutes")]
+    pub minutes: i64,
+    #[serde(rename = "Source", default)]
+    pub source: Option<String>,
+    #[serde(rename = "Platform", default)]
+    pub platform: Option<String>,
+    #[serde(rename = "Adjustment", default)]
+    pub adjustment: Option<i64>,
+}
+
+impl UsageCsvRow {
+    const HEADERS: [&str; 6] = ["App", "Date", "Minutes", "Source", "Platform", "Adjustment"];
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -1418,6 +1444,209 @@ pub fn import_milestones_csv_from_reader<R: Read>(
 
     tx.commit().map_err(|e| e.to_string())?;
     Ok(imported_count)
+}
+
+// ── Tracked App Time usage CSV (soft-fork feature) ──────────────────────────
+
+/// Export every usage entry as a human-readable CSV, apps named by display name.
+pub fn export_tracked_app_usage_csv(conn: &Connection, file_path: &str) -> Result<usize, String> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT a.display_name, u.date, u.minutes, u.source, u.platform,
+                    u.manual_adjustment_minutes
+             FROM main.usage_entries u
+             JOIN main.tracked_apps a ON a.uid = u.tracked_app_uid
+             ORDER BY u.date ASC, a.display_name COLLATE NOCASE ASC, u.id ASC",
+        )
+        .map_err(|e| e.to_string())?;
+
+    let rows = stmt
+        .query_map([], |row| {
+            Ok(UsageCsvRow {
+                app: row.get(0)?,
+                date: row.get(1)?,
+                minutes: row.get(2)?,
+                source: Some(row.get(3)?),
+                platform: Some(row.get(4)?),
+                adjustment: row.get(5)?,
+            })
+        })
+        .map_err(|e| e.to_string())?;
+
+    let mut count = 0;
+    let mut wtr = atomic_csv_writer(file_path)?;
+    for row in rows {
+        wtr.serialize(row.map_err(|e| e.to_string())?)
+            .map_err(|e| e.to_string())?;
+        count += 1;
+    }
+    if count == 0 {
+        wtr.write_record(UsageCsvRow::HEADERS)
+            .map_err(|e| e.to_string())?;
+    }
+    persist_atomic_csv(wtr, file_path)?;
+    Ok(count)
+}
+
+struct UsageImportIntent {
+    app: String,
+    date: String,
+    minutes: i64,
+    source: String,
+    platform: String,
+    adjustment: Option<i64>,
+}
+
+pub fn import_tracked_app_usage_csv(
+    conn: &mut Connection,
+    file_path: &str,
+) -> Result<usize, String> {
+    let path = Path::new(file_path);
+    if !path.exists() {
+        return Err("File not found".into());
+    }
+    let file = File::open(path).map_err(|e| e.to_string())?;
+    import_tracked_app_usage_csv_from_reader(conn, file)
+}
+
+pub fn import_tracked_app_usage_csv_from_reader<R: Read>(
+    conn: &mut Connection,
+    reader: R,
+) -> Result<usize, String> {
+    let mut rdr = csv::ReaderBuilder::new()
+        .has_headers(true)
+        .from_reader(reader);
+    let headers = rdr.headers().map_err(|e| e.to_string())?.clone();
+    validate_csv_headers(&headers, &UsageCsvRow::HEADERS, "usage CSV")?;
+    require_csv_headers(&headers, &["App", "Date", "Minutes"], "usage CSV")?;
+
+    // Preflight: validate every row and resolve existing apps before any write.
+    let mut intents: Vec<UsageImportIntent> = Vec::new();
+    for (index, result) in rdr.deserialize::<UsageCsvRow>().enumerate() {
+        let row_number = index + 2;
+        let record =
+            result.map_err(|e| format!("Failed to parse usage CSV row {row_number}: {e}"))?;
+        let app = record.app.trim();
+        if app.is_empty() {
+            return Err(format!("Usage CSV row {row_number} is missing an App name"));
+        }
+        let date = record.date.trim();
+        if NaiveDate::parse_from_str(date, "%Y-%m-%d").is_err() {
+            return Err(format!(
+                "Usage CSV row {row_number} has an invalid Date '{date}' (expected YYYY-MM-DD)"
+            ));
+        }
+        if record.minutes < 0 {
+            return Err(format!("Usage CSV row {row_number} has negative Minutes"));
+        }
+        let source = record
+            .source
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or(tracked_app_time::SOURCE_MANUAL)
+            .to_string();
+        if source != tracked_app_time::SOURCE_MANUAL && source != tracked_app_time::SOURCE_ANDROID_AUTO
+        {
+            return Err(format!("Usage CSV row {row_number} has an unknown Source '{source}'"));
+        }
+        let platform = record
+            .platform
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or(tracked_app_time::PLATFORM_DESKTOP)
+            .to_string();
+        if ![
+            tracked_app_time::PLATFORM_ANDROID,
+            tracked_app_time::PLATFORM_DESKTOP,
+            tracked_app_time::PLATFORM_WEB,
+        ]
+        .contains(&platform.as_str())
+        {
+            return Err(format!(
+                "Usage CSV row {row_number} has an unknown Platform '{platform}'"
+            ));
+        }
+        if let Some(adjustment) = record.adjustment {
+            if adjustment < 0 {
+                return Err(format!(
+                    "Usage CSV row {row_number} has a negative Adjustment"
+                ));
+            }
+        }
+        intents.push(UsageImportIntent {
+            app: app.to_string(),
+            date: date.to_string(),
+            minutes: record.minutes,
+            source,
+            platform,
+            adjustment: record.adjustment,
+        });
+    }
+
+    // Resolve app identities up front (ambiguous names abort before any write).
+    let mut uid_by_name: HashMap<String, Option<String>> = HashMap::new();
+    for intent in &intents {
+        if !uid_by_name.contains_key(&intent.app) {
+            let existing = tracked_app_time::find_tracked_app_uid_by_name(conn, &intent.app)
+                .map_err(|e| e.to_string())?;
+            uid_by_name.insert(intent.app.clone(), existing);
+        }
+    }
+
+    let tx = conn.transaction().map_err(|e| e.to_string())?;
+    // Create any apps that did not already exist, as manual-only tracked apps.
+    for (name, existing) in uid_by_name.iter_mut() {
+        if existing.is_none() {
+            tracked_app_time::add_tracked_app(
+                &tx,
+                &TrackedApp {
+                    id: None,
+                    uid: None,
+                    display_name: name.clone(),
+                    android_package_name: None,
+                    icon: None,
+                    auto_tracking_enabled: false,
+                    manual_entry_enabled: true,
+                    created_at: None,
+                    archived: false,
+                },
+            )
+            .map_err(|e| e.to_string())?;
+            *existing = tracked_app_time::find_tracked_app_uid_by_name(&tx, name)
+                .map_err(|e| e.to_string())?;
+        }
+    }
+
+    let mut imported = 0;
+    for intent in intents {
+        let uid = uid_by_name
+            .get(&intent.app)
+            .and_then(|value| value.clone())
+            .ok_or_else(|| format!("Could not resolve tracked app '{}'", intent.app))?;
+        tracked_app_time::add_usage_entry(
+            &tx,
+            &UsageEntry {
+                id: None,
+                uid: None,
+                tracked_app_uid: uid,
+                date: intent.date,
+                minutes: intent.minutes,
+                source: intent.source,
+                platform: intent.platform,
+                manual_adjustment_minutes: intent.adjustment,
+                created_at: None,
+                updated_at: None,
+                device_id: None,
+            },
+        )
+        .map_err(|e| e.to_string())?;
+        imported += 1;
+    }
+
+    tx.commit().map_err(|e| e.to_string())?;
+    Ok(imported)
 }
 
 // Parses the CSV and identifies which incoming media exist vs which are new.
@@ -3534,5 +3763,129 @@ mod tests {
         assert_eq!(logs[0].notes, "");
 
         std::fs::remove_file(csv_path).ok();
+    }
+
+    // ── Tracked App Time usage CSV ──────────────────────────────────────────
+
+    fn add_sample_tracked_app(conn: &Connection, name: &str) -> String {
+        tracked_app_time::add_tracked_app(
+            conn,
+            &TrackedApp {
+                id: None,
+                uid: None,
+                display_name: name.to_string(),
+                android_package_name: None,
+                icon: None,
+                auto_tracking_enabled: false,
+                manual_entry_enabled: true,
+                created_at: None,
+                archived: false,
+            },
+        )
+        .unwrap();
+        tracked_app_time::find_tracked_app_uid_by_name(conn, name)
+            .unwrap()
+            .unwrap()
+    }
+
+    #[test]
+    fn usage_csv_round_trips_through_export_and_import() {
+        let conn = setup_test_db();
+        let anki = add_sample_tracked_app(&conn, "AnkiDroid");
+        tracked_app_time::add_usage_entry(
+            &conn,
+            &UsageEntry {
+                id: None,
+                uid: None,
+                tracked_app_uid: anki.clone(),
+                date: "2026-10-11".to_string(),
+                minutes: 30,
+                source: "manual".to_string(),
+                platform: "desktop".to_string(),
+                manual_adjustment_minutes: None,
+                created_at: None,
+                updated_at: None,
+                device_id: None,
+            },
+        )
+        .unwrap();
+        tracked_app_time::add_usage_entry(
+            &conn,
+            &UsageEntry {
+                id: None,
+                uid: None,
+                tracked_app_uid: anki.clone(),
+                date: "2026-10-11".to_string(),
+                minutes: 90,
+                source: "android_auto".to_string(),
+                platform: "android".to_string(),
+                manual_adjustment_minutes: None,
+                created_at: None,
+                updated_at: None,
+                device_id: None,
+            },
+        )
+        .unwrap();
+
+        let path = write_csv("");
+        let exported = export_tracked_app_usage_csv(&conn, &path).unwrap();
+        assert_eq!(exported, 2);
+
+        // Re-import into a fresh database: the app is recreated by name and both
+        // contributions come back, summing to the same displayed total.
+        let mut fresh = setup_test_db();
+        let imported = import_tracked_app_usage_csv(&mut fresh, &path).unwrap();
+        assert_eq!(imported, 2);
+        let apps = tracked_app_time::get_tracked_apps(&fresh, false).unwrap();
+        assert_eq!(apps.len(), 1);
+        assert_eq!(apps[0].display_name, "AnkiDroid");
+        assert_eq!(
+            tracked_app_time::get_tracked_app_total_minutes(&fresh, "2026-10-11").unwrap(),
+            120
+        );
+
+        drop(conn);
+        drop(fresh);
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn usage_csv_import_defaults_source_and_platform() {
+        let mut conn = setup_test_db();
+        let path = write_csv("App,Date,Minutes\nRenshuu,2026-10-11,25\n");
+        let imported = import_tracked_app_usage_csv(&mut conn, &path).unwrap();
+        assert_eq!(imported, 1);
+        let app_uid = tracked_app_time::find_tracked_app_uid_by_name(&conn, "Renshuu")
+            .unwrap()
+            .unwrap();
+        let entries = tracked_app_time::get_usage_entries_for_day(&conn, &app_uid, "2026-10-11")
+            .unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].source, "manual");
+        assert_eq!(entries[0].platform, "desktop");
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn usage_csv_import_aborts_without_writing_on_a_bad_row() {
+        let mut conn = setup_test_db();
+        let path = write_csv("App,Date,Minutes\nGood,2026-10-11,10\nBad,not-a-date,5\n");
+        assert!(import_tracked_app_usage_csv(&mut conn, &path).is_err());
+        // Preflight failed before the transaction, so nothing was written.
+        assert!(tracked_app_time::get_tracked_apps(&conn, true).unwrap().is_empty());
+        assert_eq!(
+            tracked_app_time::get_tracked_app_total_minutes(&conn, "2026-10-11").unwrap(),
+            0
+        );
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn usage_csv_rejects_unknown_columns() {
+        let mut conn = setup_test_db();
+        let path = write_csv("App,Date,Minutes,Tracked App UID\nAnki,2026-10-11,10,secret\n");
+        let error = import_tracked_app_usage_csv(&mut conn, &path).unwrap_err();
+        assert!(error.contains("Tracked App UID") || error.contains("Unsupported"));
+        std::fs::remove_file(path).ok();
     }
 }

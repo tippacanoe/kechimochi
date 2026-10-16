@@ -237,6 +237,8 @@ export function getTrackedAppDailyTotals(date: string): Promise<AppDailyTotal[]>
 export function getTrackedAppTotalMinutes(date: string): Promise<number> { return getServices().getTrackedAppTotalMinutes(date); }
 export function refreshTrackedAppUsage(): Promise<UsageRefreshOutcome> { return getServices().refreshTrackedAppUsage(); }
 export function openUsageAccessSettings(): Promise<void> { return getServices().openUsageAccessSettings(); }
+export function exportTrackedAppUsageCsv(filePath = ''): Promise<number> { return getServices().exportTrackedAppUsageCsv(filePath); }
+export function importTrackedAppUsageCsv(filePath = ''): Promise<number> { return getServices().importTrackedAppUsageCsv(filePath); }
 
 export function getMilestones(mediaUid: string): Promise<Milestone[]> { return getServices().getMilestones(mediaUid); }
 export function addMilestone(milestone: Milestone): Promise<number> { return getServices().addMilestone(milestone); }

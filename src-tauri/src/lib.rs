@@ -1293,6 +1293,28 @@ fn import_milestones_csv(
 }
 
 #[tauri::command]
+fn export_tracked_app_usage_csv(
+    state: State<DbState>,
+    file_path: String,
+) -> Result<usize, String> {
+    with_conn(&state, |conn| {
+        csv_import::export_tracked_app_usage_csv(conn, &file_path)
+    })
+}
+
+#[tauri::command]
+fn import_tracked_app_usage_csv(
+    app_handle: tauri::AppHandle,
+    state: State<DbState>,
+    file_path: String,
+) -> Result<usize, String> {
+    let file = app_file_io::open_input_file(&app_handle, &file_path)?;
+    run_dirty_command(&app_handle, &state, |conn| {
+        csv_import::import_tracked_app_usage_csv_from_reader(conn, file)
+    })
+}
+
+#[tauri::command]
 fn upload_cover_image(
     app_handle: tauri::AppHandle,
     state: State<DbState>,
@@ -2256,6 +2278,8 @@ pub fn run() {
             get_tracked_app_total_minutes,
             refresh_tracked_app_usage,
             open_usage_access_settings,
+            export_tracked_app_usage_csv,
+            import_tracked_app_usage_csv,
             backup::export_full_backup,
             backup::import_full_backup
         ])

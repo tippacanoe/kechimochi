@@ -268,6 +268,11 @@ pub fn build_api_router(state: SharedApiState, config: HttpApiRouterConfig) -> R
                 post(import_milestones).layer(DefaultBodyLimit::max(CSV_IMPORT_LIMIT)),
             )
             .route("/api/export/milestones", get(export_milestones))
+            .route("/api/export/usage", get(export_usage))
+            .route(
+                "/api/import/usage",
+                post(import_usage).layer(DefaultBodyLimit::max(CSV_IMPORT_LIMIT)),
+            )
             .route(
                 "/api/export/full-backup",
                 post(export_full_backup_handler)
@@ -874,6 +879,45 @@ async fn get_tracked_app_total_minutes_handler(
     tracked_app_time::get_tracked_app_total_minutes(&conn, &params.date)
         .ae()
         .map(Json)
+}
+
+async fn export_usage(State(s): State<SharedApiState>) -> HandlerResult<Response> {
+    let tmp = tempfile::NamedTempFile::new().ae()?;
+    let path = tmp
+        .path()
+        .to_str()
+        .ok_or_else(|| AppError::Internal("Invalid temp path".into()))?
+        .to_owned();
+    let count = {
+        let conn = s.conn.lock().ae()?;
+        csv_import::export_tracked_app_usage_csv(&conn, &path).ae()?
+    };
+    let body = tempfile_body(&tmp)?;
+    Response::builder()
+        .header(header::CONTENT_TYPE, "text/csv; charset=utf-8")
+        .header(
+            header::CONTENT_DISPOSITION,
+            "attachment; filename=\"tracked-app-usage.csv\"",
+        )
+        .header("x-row-count", count.to_string())
+        .body(body)
+        .ae()
+}
+
+async fn import_usage(
+    State(s): State<SharedApiState>,
+    mut multipart: Multipart,
+) -> HandlerResult<Json<serde_json::Value>> {
+    let tmp = field_to_tempfile(&mut multipart).await?;
+    let path = tmp
+        .path()
+        .to_str()
+        .ok_or_else(|| AppError::Internal("Invalid temp path".into()))?
+        .to_owned();
+    let count = with_dirty_conn(&s, |conn| {
+        csv_import::import_tracked_app_usage_csv(conn, &path).map_err(map_csv_import_error)
+    })?;
+    Ok(Json(serde_json::json!({ "count": count })))
 }
 
 async fn clear_activities(State(s): State<SharedApiState>) -> HandlerResult<Json<()>> {

@@ -26,6 +26,8 @@ import {
     getTrackedAppTotalMinutes,
     refreshTrackedAppUsage,
     openUsageAccessSettings,
+    exportTrackedAppUsageCsv,
+    importTrackedAppUsageCsv,
 } from '../api';
 import type { TrackedApp, UsageEntry, AppDailyTotal, UsagePlatform } from '../types';
 
@@ -154,6 +156,8 @@ export class TrackedAppsView extends Component<TrackedAppsState> {
                     </div>
                     <div class="tracked-apps-header-actions">
                         ${refreshButton}
+                        <button class="btn btn-secondary" id="tracked-apps-export">Export CSV</button>
+                        <button class="btn btn-secondary" id="tracked-apps-import">Import CSV</button>
                         <button class="btn btn-primary" id="tracked-apps-add">Add app</button>
                     </div>
                 </header>
@@ -294,6 +298,8 @@ export class TrackedAppsView extends Component<TrackedAppsState> {
 
     private wireControls(root: HTMLElement): void {
         root.querySelector('#tracked-apps-add')?.addEventListener('click', () => this.handleAddApp());
+        root.querySelector('#tracked-apps-export')?.addEventListener('click', () => this.handleExportCsv());
+        root.querySelector('#tracked-apps-import')?.addEventListener('click', () => this.handleImportCsv());
         root.querySelector('#tracked-apps-refresh')?.addEventListener('click', () => this.maybeCollect());
         root.querySelector('#tracked-apps-grant')?.addEventListener('click', async () => {
             await openUsageAccessSettings();
@@ -347,6 +353,30 @@ export class TrackedAppsView extends Component<TrackedAppsState> {
 
     private notifyDataChanged(): void {
         globalThis.dispatchEvent(new CustomEvent(EVENTS.LOCAL_DATA_CHANGED, { detail: {} }));
+    }
+
+    private async handleExportCsv(): Promise<void> {
+        try {
+            const count = await exportTrackedAppUsageCsv();
+            if (count > 0) {
+                await customAlert('Exported', `Exported ${count} usage ${count === 1 ? 'entry' : 'entries'}.`);
+            }
+        } catch (error) {
+            await customAlert('Could not export usage CSV', String(error));
+        }
+    }
+
+    private async handleImportCsv(): Promise<void> {
+        try {
+            const count = await importTrackedAppUsageCsv();
+            if (count > 0) {
+                this.notifyDataChanged();
+                await this.loadDisplay();
+                await customAlert('Imported', `Imported ${count} usage ${count === 1 ? 'entry' : 'entries'}.`);
+            }
+        } catch (error) {
+            await customAlert('Could not import usage CSV', String(error));
+        }
     }
 
     private async handleAddApp(): Promise<void> {
