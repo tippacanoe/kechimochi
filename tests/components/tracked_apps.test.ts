@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { TrackedAppsView, formatMinutes } from '../../src/tracked_apps/TrackedAppsView';
 import * as api from '../../src/api';
+import * as modal from '../../src/modal_base';
 import type { TrackedApp, AppDailyTotal } from '../../src/types';
 
 vi.mock('../../src/api', () => ({
@@ -172,5 +173,108 @@ describe('TrackedAppsView', () => {
         await vi.waitFor(() =>
             expect(container.querySelector('.tracked-apps-total-value')?.textContent).toBe('1h'),
         );
+    });
+
+    describe('linking apps to Android packages', () => {
+        const mockedModal = vi.mocked(modal);
+
+        async function mountWithAutoCollection(available: boolean) {
+            mockedApi.refreshTrackedAppUsage.mockResolvedValue({
+                available,
+                permissionGranted: true,
+                updatedEntries: 0,
+            });
+            const mounted = mountView();
+            await mounted.view.loadData();
+            await vi.waitFor(() => expect(mockedApi.refreshTrackedAppUsage).toHaveBeenCalled());
+            if (available) {
+                await vi.waitFor(() =>
+                    expect(mounted.container.querySelector('#tracked-apps-refresh')).not.toBeNull(),
+                );
+            }
+            return mounted;
+        }
+
+        it('adds an auto-tracked app when a package ID is given on Android', async () => {
+            mockedModal.customPrompt.mockResolvedValueOnce('Takoboto').mockResolvedValueOnce(' jp.takoboto ');
+            const { container } = await mountWithAutoCollection(true);
+
+            container.querySelector<HTMLButtonElement>('#tracked-apps-add')?.click();
+            await vi.waitFor(() => expect(mockedApi.addTrackedApp).toHaveBeenCalledTimes(1));
+
+            expect(mockedApi.addTrackedApp).toHaveBeenCalledWith({
+                display_name: 'Takoboto',
+                android_package_name: 'jp.takoboto',
+                auto_tracking_enabled: true,
+                manual_entry_enabled: true,
+                archived: false,
+            });
+        });
+
+        it('adds a manual-only app when the package ID is left blank', async () => {
+            mockedModal.customPrompt.mockResolvedValueOnce('Paper books').mockResolvedValueOnce('');
+            const { container } = await mountWithAutoCollection(true);
+
+            container.querySelector<HTMLButtonElement>('#tracked-apps-add')?.click();
+            await vi.waitFor(() => expect(mockedApi.addTrackedApp).toHaveBeenCalledTimes(1));
+
+            expect(mockedApi.addTrackedApp).toHaveBeenCalledWith(
+                expect.objectContaining({ android_package_name: null, auto_tracking_enabled: false }),
+            );
+        });
+
+        it('rejects a malformed package ID without adding the app', async () => {
+            mockedModal.customPrompt.mockResolvedValueOnce('Bad').mockResolvedValueOnce('not a package');
+            const { container } = await mountWithAutoCollection(true);
+
+            container.querySelector<HTMLButtonElement>('#tracked-apps-add')?.click();
+            await vi.waitFor(() =>
+                expect(mockedModal.customAlert).toHaveBeenCalledWith('Invalid package ID', expect.any(String)),
+            );
+            expect(mockedApi.addTrackedApp).not.toHaveBeenCalled();
+        });
+
+        it('only asks for a name where automatic collection is unavailable', async () => {
+            mockedModal.customPrompt.mockResolvedValueOnce('Windows Anki');
+            const { container } = await mountWithAutoCollection(false);
+
+            expect(container.querySelector('[data-action="package"]')).toBeNull();
+            container.querySelector<HTMLButtonElement>('#tracked-apps-add')?.click();
+            await vi.waitFor(() => expect(mockedApi.addTrackedApp).toHaveBeenCalledTimes(1));
+
+            expect(mockedModal.customPrompt).toHaveBeenCalledTimes(1);
+            expect(mockedApi.addTrackedApp).toHaveBeenCalledWith(
+                expect.objectContaining({ android_package_name: null, auto_tracking_enabled: false }),
+            );
+        });
+
+        it('links an existing manual app to a package via the Android ID action', async () => {
+            mockedModal.customPrompt.mockResolvedValueOnce('com.renshuu.app');
+            const { container } = await mountWithAutoCollection(true);
+
+            container.querySelector<HTMLButtonElement>('[data-action="package"][data-id="2"]')?.click();
+            await vi.waitFor(() => expect(mockedApi.updateTrackedApp).toHaveBeenCalledTimes(1));
+
+            expect(mockedApi.updateTrackedApp).toHaveBeenCalledWith({
+                ...sampleApps[1],
+                android_package_name: 'com.renshuu.app',
+                auto_tracking_enabled: true,
+            });
+        });
+
+        it('refuses a package ID already linked to another app', async () => {
+            mockedApi.getTrackedApps.mockResolvedValue([
+                { ...sampleApps[0], android_package_name: 'com.ichi2.anki' },
+                sampleApps[1],
+            ]);
+            mockedModal.customPrompt.mockResolvedValueOnce('com.ichi2.anki');
+            const { container } = await mountWithAutoCollection(true);
+
+            container.querySelector<HTMLButtonElement>('[data-action="package"][data-id="2"]')?.click();
+            await vi.waitFor(() =>
+                expect(mockedModal.customAlert).toHaveBeenCalledWith('Package already tracked', expect.any(String)),
+            );
+            expect(mockedApi.updateTrackedApp).not.toHaveBeenCalled();
+        });
     });
 });

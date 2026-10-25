@@ -2,7 +2,8 @@
  * Tracked App Time — management screen (soft-fork feature).
  *
  * A self-contained top-level view: list tracked apps with today's merged total,
- * add a manual-only app, rename/archive, log app time by hand, and drill into a
+ * add an app (manual-only, or linked to an Android package for automatic
+ * collection where that exists), rename/archive, log app time by hand, and drill into a
  * day's contributing entries (adjust or delete each). Automatic Android
  * collection fills the same data from the native side; this screen never needs
  * platform-specific code — it only reads and writes rows through the shared API.
@@ -61,6 +62,9 @@ export function formatMinutes(minutes: number): string {
     if (mins === 0) return `${hours}h`;
     return `${hours}h ${mins}m`;
 }
+
+/** Dotted Java-style identifier with at least two segments, e.g. com.ichi2.anki. */
+const ANDROID_PACKAGE_PATTERN = /^[A-Za-z]\w*(\.[A-Za-z]\w*)+$/;
 
 function manualPlatform(): UsagePlatform {
     return isDesktop() ? 'desktop' : 'web';
@@ -237,6 +241,11 @@ export class TrackedAppsView extends Component<TrackedAppsState> {
                 </div>
                 <div class="tracked-apps-row-actions">
                     <button class="btn btn-secondary btn-sm" data-action="rename" data-id="${app.id}">Rename</button>
+                    ${
+                        this.state.autoAvailable
+                            ? html`<button class="btn btn-secondary btn-sm" data-action="package" data-id="${app.id}">Android ID</button>`
+                            : null
+                    }
                     <button class="btn btn-danger btn-sm" data-action="archive" data-id="${app.id}">Archive</button>
                 </div>
             </div>
@@ -336,6 +345,7 @@ export class TrackedAppsView extends Component<TrackedAppsState> {
                 const button = el as HTMLElement;
                 const id = Number(button.dataset.id);
                 if (button.dataset.action === 'rename') this.handleRename(id);
+                else if (button.dataset.action === 'package') this.handleSetPackage(id);
                 else if (button.dataset.action === 'archive') this.handleArchive(id);
             });
         });
@@ -384,10 +394,19 @@ export class TrackedAppsView extends Component<TrackedAppsState> {
         if (name === null) return;
         const trimmed = name.trim();
         if (!trimmed) return;
+        // Where automatic collection exists (Android), optionally link the app
+        // to its package so the collector picks it up; blank = manual-only.
+        let packageName: string | null = null;
+        if (this.state.autoAvailable) {
+            const picked = await this.promptPackageName('');
+            if (picked === undefined) return;
+            packageName = picked;
+        }
         try {
             await addTrackedApp({
                 display_name: trimmed,
-                auto_tracking_enabled: false,
+                android_package_name: packageName,
+                auto_tracking_enabled: packageName !== null,
                 manual_entry_enabled: true,
                 archived: false,
             });
@@ -396,6 +415,52 @@ export class TrackedAppsView extends Component<TrackedAppsState> {
         } catch (error) {
             await customAlert('Could not add app', String(error));
         }
+    }
+
+    /** Link (or unlink) an existing app to an Android package for automatic collection. */
+    private async handleSetPackage(id: number): Promise<void> {
+        const app = this.state.apps.find(candidate => candidate.id === id);
+        if (!app) return;
+        const current = app.android_package_name ?? '';
+        const picked = await this.promptPackageName(current, id);
+        if (picked === undefined || (picked ?? '') === current) return;
+        try {
+            await updateTrackedApp({
+                ...app,
+                android_package_name: picked,
+                auto_tracking_enabled: picked !== null,
+            });
+            this.notifyDataChanged();
+            await this.loadData();
+        } catch (error) {
+            await customAlert('Could not update app', String(error));
+        }
+    }
+
+    /** Ask for an Android package ID. Resolves to the validated ID, `null` for
+     *  blank (manual-only), or `undefined` when cancelled or rejected. */
+    private async promptPackageName(current: string, excludeId?: number): Promise<string | null | undefined> {
+        const input = await customPrompt(
+            'Android package ID',
+            current,
+            'Optional: the package ID to track automatically, e.g. com.ichi2.anki for AnkiDroid. ' +
+                'It is the "id=" part of the app\'s Play Store link. Leave blank for manual-only.',
+        );
+        if (input === null) return undefined;
+        const trimmed = input.trim();
+        if (!trimmed) return null;
+        if (!ANDROID_PACKAGE_PATTERN.test(trimmed)) {
+            await customAlert('Invalid package ID', `"${trimmed}" is not a valid Android package ID (e.g. com.ichi2.anki).`);
+            return undefined;
+        }
+        const clash = this.state.apps.find(
+            candidate => candidate.id !== excludeId && candidate.android_package_name === trimmed,
+        );
+        if (clash) {
+            await customAlert('Package already tracked', `"${trimmed}" is already linked to "${clash.display_name}".`);
+            return undefined;
+        }
+        return trimmed;
     }
 
     private async handleRename(id: number): Promise<void> {
