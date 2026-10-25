@@ -11,7 +11,7 @@ use axum::{
     http::{header, HeaderMap, HeaderValue, Method, Request, StatusCode},
     middleware::{self, Next},
     response::{IntoResponse, Response},
-    routing::{any, get, post, put},
+    routing::{any, delete, get, post, put},
     Json, Router,
 };
 use rusqlite::Connection;
@@ -23,6 +23,7 @@ use tower_http::cors::{Any, CorsLayer};
 
 use crate::{
     backup, csv_import, db, get_username_logic, models, profile_picture, remote_fetch, sync_state,
+    tracked_app_time,
 };
 
 pub type DirtyCallback = Arc<dyn Fn() -> Result<(), String> + Send + Sync>;
@@ -205,6 +206,34 @@ pub fn build_api_router(state: SharedApiState, config: HttpApiRouterConfig) -> R
         .route("/api/profiles/initialize", post(initialize_user_db_handler))
         .route("/api/profile-picture", profile_picture_routes)
         .route("/api/settings/:key", get(get_setting).put(set_setting))
+        // Tracked App Time (soft-fork feature). Read/write of tracked apps and
+        // usage entries belongs in the `automation` scope, alongside logs.
+        .route(
+            "/api/tracked-apps",
+            get(get_tracked_apps_handler).post(add_tracked_app_handler),
+        )
+        .route("/api/tracked-apps/:id", put(update_tracked_app_handler))
+        .route(
+            "/api/tracked-apps/:id/archive",
+            post(set_tracked_app_archived_handler),
+        )
+        .route(
+            "/api/usage-entries",
+            get(get_usage_entries_handler).post(add_usage_entry_handler),
+        )
+        .route("/api/usage-entries/:id", delete(delete_usage_entry_handler))
+        .route(
+            "/api/usage-entries/:id/adjustment",
+            post(set_usage_entry_adjustment_handler),
+        )
+        .route(
+            "/api/tracked-app-totals/daily",
+            get(get_tracked_app_daily_totals_handler),
+        )
+        .route(
+            "/api/tracked-app-totals/minutes",
+            get(get_tracked_app_total_minutes_handler),
+        )
         .route("/api/username", get(get_username))
         .route("/api/version", get(get_version));
 
@@ -239,6 +268,11 @@ pub fn build_api_router(state: SharedApiState, config: HttpApiRouterConfig) -> R
                 post(import_milestones).layer(DefaultBodyLimit::max(CSV_IMPORT_LIMIT)),
             )
             .route("/api/export/milestones", get(export_milestones))
+            .route("/api/export/usage", get(export_usage))
+            .route(
+                "/api/import/usage",
+                post(import_usage).layer(DefaultBodyLimit::max(CSV_IMPORT_LIMIT)),
+            )
             .route(
                 "/api/export/full-backup",
                 post(export_full_backup_handler)
@@ -690,6 +724,200 @@ async fn get_username() -> Json<String> {
 async fn get_version() -> Json<String> {
     let version = option_env!("CARGO_PKG_VERSION").unwrap_or("0.0.0");
     Json(format!("http-{}", version))
+}
+
+// --- Tracked App Time handlers (soft-fork feature) --------------------------
+
+/// Map a tracked-app-time data error to the right HTTP status: validation and
+/// not-found messages are client errors, anything else is internal.
+fn map_tracked_app_write_error(error: rusqlite::Error) -> AppError {
+    let message = error.to_string();
+    if message.contains("cannot be blank")
+        || message.contains("requires an id")
+        || message.contains("not found")
+        || message.contains("must be between")
+        || message.contains("must be YYYY-MM-DD")
+        || message.contains("references unknown")
+        || message.contains("Unknown usage")
+        || message.contains("requires a tracked app")
+    {
+        AppError::BadRequest(message)
+    } else {
+        AppError::Internal(message)
+    }
+}
+
+#[derive(Deserialize)]
+struct TrackedAppsQuery {
+    #[serde(default)]
+    include_archived: bool,
+}
+
+#[derive(Deserialize)]
+struct UsageEntriesQuery {
+    tracked_app_uid: String,
+    date: String,
+}
+
+#[derive(Deserialize)]
+struct DateQuery {
+    date: String,
+}
+
+#[derive(Deserialize)]
+struct ArchiveBody {
+    archived: bool,
+}
+
+#[derive(Deserialize)]
+struct AdjustmentBody {
+    #[serde(default)]
+    adjustment: Option<i64>,
+}
+
+async fn get_tracked_apps_handler(
+    State(s): State<SharedApiState>,
+    Query(params): Query<TrackedAppsQuery>,
+) -> HandlerResult<Json<Vec<tracked_app_time::TrackedApp>>> {
+    let conn = s.conn.lock().ae()?;
+    tracked_app_time::get_tracked_apps(&conn, params.include_archived)
+        .ae()
+        .map(Json)
+}
+
+async fn add_tracked_app_handler(
+    State(s): State<SharedApiState>,
+    Json(app): Json<tracked_app_time::TrackedApp>,
+) -> HandlerResult<Json<i64>> {
+    let id = with_dirty_conn(&s, |conn| {
+        tracked_app_time::add_tracked_app(conn, &app).map_err(map_tracked_app_write_error)
+    })?;
+    Ok(Json(id))
+}
+
+async fn update_tracked_app_handler(
+    State(s): State<SharedApiState>,
+    Path(id): Path<i64>,
+    Json(mut app): Json<tracked_app_time::TrackedApp>,
+) -> HandlerResult<Json<()>> {
+    app.id = Some(id);
+    with_dirty_conn(&s, |conn| {
+        tracked_app_time::update_tracked_app(conn, &app).map_err(map_tracked_app_write_error)
+    })?;
+    Ok(Json(()))
+}
+
+async fn set_tracked_app_archived_handler(
+    State(s): State<SharedApiState>,
+    Path(id): Path<i64>,
+    Json(body): Json<ArchiveBody>,
+) -> HandlerResult<Json<()>> {
+    with_dirty_conn(&s, |conn| {
+        tracked_app_time::set_tracked_app_archived(conn, id, body.archived)
+            .map_err(map_tracked_app_write_error)
+    })?;
+    Ok(Json(()))
+}
+
+async fn get_usage_entries_handler(
+    State(s): State<SharedApiState>,
+    Query(params): Query<UsageEntriesQuery>,
+) -> HandlerResult<Json<Vec<tracked_app_time::UsageEntry>>> {
+    let conn = s.conn.lock().ae()?;
+    tracked_app_time::get_usage_entries_for_day(&conn, &params.tracked_app_uid, &params.date)
+        .ae()
+        .map(Json)
+}
+
+async fn add_usage_entry_handler(
+    State(s): State<SharedApiState>,
+    Json(entry): Json<tracked_app_time::UsageEntry>,
+) -> HandlerResult<Json<i64>> {
+    let id = with_dirty_conn(&s, |conn| {
+        tracked_app_time::add_usage_entry(conn, &entry).map_err(map_tracked_app_write_error)
+    })?;
+    Ok(Json(id))
+}
+
+async fn set_usage_entry_adjustment_handler(
+    State(s): State<SharedApiState>,
+    Path(id): Path<i64>,
+    Json(body): Json<AdjustmentBody>,
+) -> HandlerResult<Json<()>> {
+    with_dirty_conn(&s, |conn| {
+        tracked_app_time::set_usage_entry_adjustment(conn, id, body.adjustment)
+            .map_err(map_tracked_app_write_error)
+    })?;
+    Ok(Json(()))
+}
+
+async fn delete_usage_entry_handler(
+    State(s): State<SharedApiState>,
+    Path(id): Path<i64>,
+) -> HandlerResult<Json<()>> {
+    with_dirty_conn(&s, |conn| {
+        tracked_app_time::delete_usage_entry(conn, id).map_err(map_tracked_app_write_error)
+    })?;
+    Ok(Json(()))
+}
+
+async fn get_tracked_app_daily_totals_handler(
+    State(s): State<SharedApiState>,
+    Query(params): Query<DateQuery>,
+) -> HandlerResult<Json<Vec<tracked_app_time::AppDailyTotal>>> {
+    let conn = s.conn.lock().ae()?;
+    tracked_app_time::get_tracked_app_daily_totals(&conn, &params.date)
+        .ae()
+        .map(Json)
+}
+
+async fn get_tracked_app_total_minutes_handler(
+    State(s): State<SharedApiState>,
+    Query(params): Query<DateQuery>,
+) -> HandlerResult<Json<i64>> {
+    let conn = s.conn.lock().ae()?;
+    tracked_app_time::get_tracked_app_total_minutes(&conn, &params.date)
+        .ae()
+        .map(Json)
+}
+
+async fn export_usage(State(s): State<SharedApiState>) -> HandlerResult<Response> {
+    let tmp = tempfile::NamedTempFile::new().ae()?;
+    let path = tmp
+        .path()
+        .to_str()
+        .ok_or_else(|| AppError::Internal("Invalid temp path".into()))?
+        .to_owned();
+    let count = {
+        let conn = s.conn.lock().ae()?;
+        csv_import::export_tracked_app_usage_csv(&conn, &path).ae()?
+    };
+    let body = tempfile_body(&tmp)?;
+    Response::builder()
+        .header(header::CONTENT_TYPE, "text/csv; charset=utf-8")
+        .header(
+            header::CONTENT_DISPOSITION,
+            "attachment; filename=\"tracked-app-usage.csv\"",
+        )
+        .header("x-row-count", count.to_string())
+        .body(body)
+        .ae()
+}
+
+async fn import_usage(
+    State(s): State<SharedApiState>,
+    mut multipart: Multipart,
+) -> HandlerResult<Json<serde_json::Value>> {
+    let tmp = field_to_tempfile(&mut multipart).await?;
+    let path = tmp
+        .path()
+        .to_str()
+        .ok_or_else(|| AppError::Internal("Invalid temp path".into()))?
+        .to_owned();
+    let count = with_dirty_conn(&s, |conn| {
+        csv_import::import_tracked_app_usage_csv(conn, &path).map_err(map_csv_import_error)
+    })?;
+    Ok(Json(serde_json::json!({ "count": count })))
 }
 
 async fn clear_activities(State(s): State<SharedApiState>) -> HandlerResult<Json<()>> {
@@ -1718,5 +1946,123 @@ mod tests {
         assert!(!sync_state::sync_config_path(target_dir.path()).exists());
         assert!(!sync_state::base_snapshot_path(target_dir.path()).exists());
         assert!(!sync_state::pending_conflicts_path(target_dir.path()).exists());
+    }
+
+    #[tokio::test]
+    async fn tracked_app_time_routes_round_trip_under_automation_scope() {
+        let router = build_api_router(
+            setup_api_state(),
+            HttpApiRouterConfig {
+                scope: HttpApiScope::Automation,
+                cors: HttpApiCors::AllowedOrigins(Vec::new()),
+                host_policy: HostValidationPolicy::Disabled,
+            },
+        );
+
+        async fn json_request(
+            router: &Router,
+            method: Method,
+            uri: &str,
+            body: Option<serde_json::Value>,
+        ) -> (StatusCode, serde_json::Value) {
+            let mut builder = Request::builder().method(method).uri(uri);
+            let body = match body {
+                Some(value) => {
+                    builder = builder.header(header::CONTENT_TYPE, "application/json");
+                    Body::from(value.to_string())
+                }
+                None => Body::empty(),
+            };
+            let response = router
+                .clone()
+                .oneshot(builder.body(body).unwrap())
+                .await
+                .unwrap();
+            let status = response.status();
+            let bytes = axum::body::to_bytes(response.into_body(), 64 * 1024)
+                .await
+                .unwrap();
+            let value = if bytes.is_empty() {
+                serde_json::Value::Null
+            } else {
+                serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null)
+            };
+            (status, value)
+        }
+
+        // Create a tracked app.
+        let (status, app_id) = json_request(
+            &router,
+            Method::POST,
+            "/api/tracked-apps",
+            Some(serde_json::json!({ "display_name": "AnkiDroid" })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(app_id.as_i64().is_some());
+
+        // It appears in the list; capture its sync uid.
+        let (status, apps) =
+            json_request(&router, Method::GET, "/api/tracked-apps", None).await;
+        assert_eq!(status, StatusCode::OK);
+        let app_uid = apps[0]["uid"].as_str().unwrap().to_string();
+
+        // Two contributions for the same app/day from different sources.
+        for (minutes, source, platform) in
+            [(30, "manual", "desktop"), (90, "android_auto", "android")]
+        {
+            let (status, _) = json_request(
+                &router,
+                Method::POST,
+                "/api/usage-entries",
+                Some(serde_json::json!({
+                    "tracked_app_uid": app_uid,
+                    "date": "2026-10-11",
+                    "minutes": minutes,
+                    "source": source,
+                    "platform": platform,
+                })),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+        }
+
+        // Merged daily total sums the displayed values.
+        let (status, total) = json_request(
+            &router,
+            Method::GET,
+            "/api/tracked-app-totals/minutes?date=2026-10-11",
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(total.as_i64(), Some(120));
+
+        // Per-app daily totals expose the same sum.
+        let (status, totals) = json_request(
+            &router,
+            Method::GET,
+            "/api/tracked-app-totals/daily?date=2026-10-11",
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(totals[0]["total_minutes"].as_i64(), Some(120));
+
+        // A bad usage entry is a client error, not a 500.
+        let (status, _) = json_request(
+            &router,
+            Method::POST,
+            "/api/usage-entries",
+            Some(serde_json::json!({
+                "tracked_app_uid": "ghost",
+                "date": "2026-10-11",
+                "minutes": 10,
+                "source": "manual",
+                "platform": "desktop",
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
     }
 }

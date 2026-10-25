@@ -8125,6 +8125,8 @@ mod tests {
             settings: BTreeMap::new(),
             profile_picture: None,
             tombstones: vec![],
+            tracked_apps: BTreeMap::new(),
+            usage_entries: Vec::new(),
         };
 
         let conflict = SyncConflict::ExtraDataEntryConflict {
@@ -8319,6 +8321,8 @@ mod tests {
             settings: BTreeMap::new(),
             profile_picture: None,
             tombstones: vec![],
+            tracked_apps: BTreeMap::new(),
+            usage_entries: Vec::new(),
         }
     }
 

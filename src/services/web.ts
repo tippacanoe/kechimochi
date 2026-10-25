@@ -48,6 +48,10 @@ import type {
     SyncConflictResolution,
     SyncProgressUpdate,
     SyncStatus,
+    TrackedApp,
+    UsageEntry,
+    AppDailyTotal,
+    UsageRefreshOutcome,
 } from '../types';
 import { getBuildVersion } from '../app_version';
 import { getMockExternalJsonResponse } from './external_mocks';
@@ -400,6 +404,65 @@ export class WebServices implements AppServices {
         const form = new FormData();
         form.append('file', file);
         const res = await fetch(apiUrl('/import/milestones'), { method: 'POST', body: form });
+        if (!res.ok) throw new Error(await res.text());
+        const { count } = await res.json();
+        return count as number;
+    }
+
+    // ── Tracked App Time operations (soft-fork feature) ──────────────────────
+    getTrackedApps(includeArchived: boolean): Promise<TrackedApp[]> {
+        return get(`/tracked-apps?include_archived=${includeArchived}`);
+    }
+    addTrackedApp(app: TrackedApp): Promise<number> {
+        return post('/tracked-apps', app);
+    }
+    updateTrackedApp(app: TrackedApp): Promise<void> {
+        return put(`/tracked-apps/${app.id}`, app);
+    }
+    setTrackedAppArchived(id: number, archived: boolean): Promise<void> {
+        return post(`/tracked-apps/${id}/archive`, { archived });
+    }
+    addUsageEntry(entry: UsageEntry): Promise<number> {
+        return post('/usage-entries', entry);
+    }
+    setUsageEntryAdjustment(id: number, adjustment: number | null): Promise<void> {
+        return post(`/usage-entries/${id}/adjustment`, { adjustment });
+    }
+    deleteUsageEntry(id: number): Promise<void> {
+        return del(`/usage-entries/${id}`);
+    }
+    getUsageEntriesForDay(trackedAppUid: string, date: string): Promise<UsageEntry[]> {
+        return get(
+            `/usage-entries?tracked_app_uid=${encodeURIComponent(trackedAppUid)}&date=${encodeURIComponent(date)}`,
+        );
+    }
+    getTrackedAppDailyTotals(date: string): Promise<AppDailyTotal[]> {
+        return get(`/tracked-app-totals/daily?date=${encodeURIComponent(date)}`);
+    }
+    getTrackedAppTotalMinutes(date: string): Promise<number> {
+        return get(`/tracked-app-totals/minutes?date=${encodeURIComponent(date)}`);
+    }
+    // Automatic collection is OS-level (Android only); web mode has no per-app
+    // usage source, so report unavailable without calling the server.
+    refreshTrackedAppUsage(): Promise<UsageRefreshOutcome> {
+        return Promise.resolve({ available: false, permissionGranted: true, updatedEntries: 0 });
+    }
+    openUsageAccessSettings(): Promise<void> {
+        return Promise.resolve();
+    }
+    async exportTrackedAppUsageCsv(_filePath: string): Promise<number> {
+        const res = await fetch(apiUrl('/export/usage'));
+        if (!res.ok) throw new Error(await res.text());
+        const blob = await res.blob();
+        triggerDownload(blob, 'kechimochi_tracked_app_usage.csv');
+        return Number.parseInt(res.headers.get('X-Row-Count') ?? '0', 10);
+    }
+    async importTrackedAppUsageCsv(_filePath: string): Promise<number> {
+        const file = await pickFile('.csv');
+        if (!file) return 0;
+        const form = new FormData();
+        form.append('file', file);
+        const res = await fetch(apiUrl('/import/usage'), { method: 'POST', body: form });
         if (!res.ok) throw new Error(await res.text());
         const { count } = await res.json();
         return count as number;

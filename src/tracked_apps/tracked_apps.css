@@ -1,0 +1,286 @@
+/* Tracked App Time management screen (soft-fork feature). Classes are prefixed
+   `tracked-apps-` so these global rules do not reach other features. */
+
+.tracked-apps-view {
+    padding: 24px;
+    max-width: 880px;
+    margin: 0 auto;
+    display: flex;
+    flex-direction: column;
+    gap: 18px;
+}
+
+.tracked-apps-header {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 16px;
+    flex-wrap: wrap;
+}
+
+.tracked-apps-title {
+    margin: 0;
+    font-size: 1.6rem;
+    color: var(--text-primary);
+}
+
+.tracked-apps-subtitle {
+    margin: 4px 0 0;
+    color: var(--text-secondary);
+    font-size: 0.9rem;
+}
+
+.tracked-apps-header-actions {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+}
+
+.tracked-apps-banner {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    flex-wrap: wrap;
+    padding: 12px 16px;
+    background: color-mix(in srgb, var(--accent-red, #e5534b) 14%, var(--bg-card));
+    border: 1px solid var(--accent-red, #e5534b);
+    border-radius: var(--radius-md);
+    color: var(--text-primary);
+    font-size: 0.88rem;
+}
+
+.tracked-apps-total-card {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 16px 18px;
+    background: var(--bg-card);
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-md);
+}
+
+.tracked-apps-total-label {
+    color: var(--text-secondary);
+    font-size: 0.9rem;
+}
+
+.tracked-apps-total-value {
+    color: var(--accent-blue, var(--text-primary));
+    font-size: 1.5rem;
+    font-weight: 700;
+}
+
+.tracked-apps-logform {
+    padding: 16px 18px;
+    background: var(--bg-card);
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-md);
+}
+
+.tracked-apps-logform-row {
+    display: flex;
+    gap: 12px;
+    align-items: flex-end;
+    flex-wrap: wrap;
+}
+
+.tracked-apps-field {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    flex: 1 1 140px;
+    min-width: 0;
+    color: var(--text-secondary);
+    font-size: 0.8rem;
+}
+
+.tracked-apps-field--minutes {
+    flex: 0 1 120px;
+}
+
+.tracked-apps-field select,
+.tracked-apps-field input {
+    padding: 8px 10px;
+    background: var(--bg-dark);
+    color: var(--text-primary);
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-sm);
+    font-size: 0.95rem;
+}
+
+.tracked-apps-list {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+}
+
+.tracked-apps-empty {
+    color: var(--text-secondary);
+    text-align: center;
+    padding: 28px 0;
+}
+
+.tracked-apps-row {
+    background: var(--bg-card);
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-md);
+    overflow: hidden;
+}
+
+.tracked-apps-row-main {
+    display: grid;
+    grid-template-columns: 1fr auto auto;
+    align-items: center;
+    gap: 12px;
+    padding: 14px 16px;
+    cursor: pointer;
+    transition: background var(--transition-fast, 0.15s) ease;
+}
+
+.tracked-apps-row-main:hover,
+.tracked-apps-row-main:focus-visible {
+    background: var(--bg-card-hover);
+    outline: none;
+}
+
+.tracked-apps-row-name {
+    color: var(--text-primary);
+    font-weight: 600;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.tracked-apps-row-badges {
+    color: var(--text-secondary);
+    font-size: 0.75rem;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+}
+
+.tracked-apps-row-total {
+    color: var(--text-primary);
+    font-variant-numeric: tabular-nums;
+    font-weight: 600;
+}
+
+.tracked-apps-row-actions {
+    display: flex;
+    gap: 8px;
+    padding: 0 16px 12px;
+}
+
+.tracked-apps-row:not(.is-expanded) .tracked-apps-row-actions {
+    display: none;
+}
+
+.btn.btn-sm {
+    padding: 4px 10px;
+    font-size: 0.8rem;
+}
+
+.tracked-apps-drill {
+    border-top: 1px solid var(--border-color);
+    padding: 10px 16px 14px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.tracked-apps-drill-empty {
+    color: var(--text-secondary);
+    font-size: 0.85rem;
+    margin: 4px 0;
+}
+
+.tracked-apps-entry {
+    display: grid;
+    grid-template-columns: 1fr auto auto;
+    align-items: center;
+    gap: 12px;
+    padding: 8px 10px;
+    background: var(--bg-dark);
+    border-radius: var(--radius-sm);
+}
+
+.tracked-apps-entry-meta {
+    color: var(--text-secondary);
+    font-size: 0.8rem;
+}
+
+.tracked-apps-entry-minutes {
+    color: var(--text-primary);
+    font-variant-numeric: tabular-nums;
+}
+
+.tracked-apps-entry-actions {
+    display: flex;
+    gap: 6px;
+}
+
+/* Combined "Japanese time today" card, mounted on the dashboard. */
+.combined-today-card {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    padding: 16px 18px;
+    background: var(--bg-card);
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-md);
+}
+
+.combined-today-label {
+    color: var(--text-secondary);
+    font-size: 0.85rem;
+}
+
+.combined-today-value {
+    color: var(--text-primary);
+    font-size: 1.8rem;
+    font-weight: 700;
+    font-variant-numeric: tabular-nums;
+    line-height: 1.1;
+}
+
+.combined-today-breakdown {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 14px;
+    color: var(--text-secondary);
+    font-size: 0.82rem;
+}
+
+.combined-today-part {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.combined-today-dot {
+    width: 9px;
+    height: 9px;
+    border-radius: 50%;
+    display: inline-block;
+}
+
+.combined-today-dot--immersion {
+    background: var(--accent-blue, #4f8cff);
+}
+
+.combined-today-dot--apps {
+    background: var(--accent-green, #39c07a);
+}
+
+@media (max-width: 520px) {
+    .tracked-apps-view {
+        padding: 16px;
+    }
+    .tracked-apps-row-main {
+        grid-template-columns: 1fr auto;
+    }
+    .tracked-apps-row-badges {
+        display: none;
+    }
+}

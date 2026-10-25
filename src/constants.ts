@@ -6,6 +6,7 @@ export const VIEW_NAMES = {
     DASHBOARD: 'dashboard',
     MEDIA: 'media',
     TIMELINE: 'timeline',
+    APPS: 'apps',
     PROFILE: 'profile',
 } as const;
 

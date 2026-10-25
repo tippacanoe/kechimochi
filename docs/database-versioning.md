@@ -22,7 +22,7 @@ An app release may keep the same database schema version, and a new backup forma
 
 ## Current Baseline
 
-- Current database schema version: `8`
+- Current database schema version: `9`
 - Current backup format version: `1`
 - First stable release schema: the current latest schema in `src-tauri`
 
@@ -98,6 +98,21 @@ historical activity changes meaning.
 
 Sync snapshots carry `date_precision` per activity and default it to `day` when
 the field is absent, so snapshots written by an older client load unchanged.
+
+Schema version `9` adds the Tracked App Time feature's two tables to the `main`
+database: `tracked_apps` (one identity/config row per tracked app) and
+`usage_entries` (one row per app, per day, per source/platform). Both are new
+and additive — the `v8` to `v9` migration creates them and never alters an
+existing table, so no pre-existing row changes meaning. The DDL, migration, and
+schema validation live in the isolated `tracked_app_time` module rather than in
+`db.rs`, to keep this soft-fork feature low-conflict against future upstream
+rebases. Each table carries a stable sync `uid`. Sync snapshots gained two
+optional sections (`tracked_apps`, `usage_entries`) that default to empty, so a
+snapshot written by an older client loads unchanged. Tracked apps merge as
+last-writer-wins identity records (the same tier as settings), while usage
+entries use a keep-all-contributions merge: distinct entries from different
+devices always coexist and the merged daily total per app is summed on read from
+displayed values, never stored (spec §3.4/§7).
 
 ## Storage Model
 

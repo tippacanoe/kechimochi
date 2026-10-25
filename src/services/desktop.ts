@@ -50,6 +50,10 @@ import type {
     SyncConflictResolution,
     SyncProgressUpdate,
     SyncStatus,
+    TrackedApp,
+    UsageEntry,
+    AppDailyTotal,
+    UsageRefreshOutcome,
 } from '../types';
 import { getBuildVersion } from '../app_version';
 import { getMockExternalJsonResponse } from './external_mocks';
@@ -279,6 +283,71 @@ export class DesktopServices implements AppServices {
         }).then(selected => {
             if (!selected || typeof selected !== 'string') return 0;
             return invoke<number>('import_milestones_csv', { filePath: selected });
+        });
+    }
+
+    // ── Tracked App Time operations (soft-fork feature) ──────────────────────
+    getTrackedApps(includeArchived: boolean): Promise<TrackedApp[]> {
+        return invoke('get_tracked_apps', { includeArchived });
+    }
+    addTrackedApp(app: TrackedApp): Promise<number> {
+        return invoke('add_tracked_app', { app });
+    }
+    updateTrackedApp(app: TrackedApp): Promise<void> {
+        return invoke('update_tracked_app', { app });
+    }
+    setTrackedAppArchived(id: number, archived: boolean): Promise<void> {
+        return invoke('set_tracked_app_archived', { id, archived });
+    }
+    addUsageEntry(entry: UsageEntry): Promise<number> {
+        return invoke('add_usage_entry', { entry });
+    }
+    setUsageEntryAdjustment(id: number, adjustment: number | null): Promise<void> {
+        return invoke('set_usage_entry_adjustment', { id, adjustment });
+    }
+    deleteUsageEntry(id: number): Promise<void> {
+        return invoke('delete_usage_entry', { id });
+    }
+    getUsageEntriesForDay(trackedAppUid: string, date: string): Promise<UsageEntry[]> {
+        return invoke('get_usage_entries_for_day', { trackedAppUid, date });
+    }
+    getTrackedAppDailyTotals(date: string): Promise<AppDailyTotal[]> {
+        return invoke('get_tracked_app_daily_totals', { date });
+    }
+    getTrackedAppTotalMinutes(date: string): Promise<number> {
+        return invoke('get_tracked_app_total_minutes', { date });
+    }
+    refreshTrackedAppUsage(): Promise<UsageRefreshOutcome> {
+        return invoke('refresh_tracked_app_usage');
+    }
+    openUsageAccessSettings(): Promise<void> {
+        return invoke('open_usage_access_settings');
+    }
+    exportTrackedAppUsageCsv(filePath: string): Promise<number> {
+        if (filePath && filePath.trim().length > 0) {
+            return invoke('export_tracked_app_usage_csv', { filePath });
+        }
+        return Promise.resolve(this.getMockSavePath()).then(mockPath => {
+            if (mockPath) return mockPath;
+            return tauriSave({
+                filters: [{ name: 'CSV', extensions: ['csv'] }],
+                defaultPath: 'kechimochi_tracked_app_usage.csv',
+            });
+        }).then(savePath => {
+            if (!savePath) return 0;
+            return invoke<number>('export_tracked_app_usage_csv', { filePath: savePath });
+        });
+    }
+    importTrackedAppUsageCsv(filePath: string): Promise<number> {
+        if (filePath && filePath.trim().length > 0) {
+            return invoke('import_tracked_app_usage_csv', { filePath });
+        }
+        return Promise.resolve(this.getMockOpenPath()).then(mockPath => {
+            if (mockPath) return mockPath;
+            return tauriOpen({ multiple: false, filters: [{ name: 'CSV', extensions: ['csv'] }] });
+        }).then(selected => {
+            if (!selected || typeof selected !== 'string') return 0;
+            return invoke<number>('import_tracked_app_usage_csv', { filePath: selected });
         });
     }
 

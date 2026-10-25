@@ -13,7 +13,7 @@ use crate::models::{
     ActivityLog, ActivitySummary, DailyHeatmap, Media, Milestone, ProfilePicture, TimelineEvent,
 };
 
-pub const CURRENT_SCHEMA_VERSION: i64 = 8;
+pub const CURRENT_SCHEMA_VERSION: i64 = 9;
 
 type MigrationFn = fn(&Connection) -> Result<()>;
 
@@ -58,6 +58,13 @@ const VERSIONED_MIGRATIONS: &[Migration] = &[
         from: 7,
         to: 8,
         apply: migrate_v7_to_v8_add_activity_date_precision,
+    },
+    // Tracked App Time (soft-fork feature): additive new tables, implemented in
+    // the isolated `tracked_app_time` module to keep upstream rebases low-conflict.
+    Migration {
+        from: 8,
+        to: 9,
+        apply: crate::tracked_app_time::migrate_v8_to_v9_add_tracked_app_time,
     },
 ];
 
@@ -334,7 +341,7 @@ pub fn get_bundle_schema_version(conn: &Connection) -> Result<i64> {
     }
 }
 
-fn table_exists(conn: &Connection, schema: &str, table: &str) -> Result<bool> {
+pub(crate) fn table_exists(conn: &Connection, schema: &str, table: &str) -> Result<bool> {
     let count: i64 = conn.query_row(
         &format!(
             "SELECT COUNT(*) FROM {}.sqlite_master WHERE type='table' AND name=?1",
@@ -369,7 +376,12 @@ fn schema_has_user_tables(conn: &Connection, schema: &str) -> Result<bool> {
     Ok(count > 0)
 }
 
-fn table_has_column(conn: &Connection, schema: &str, table: &str, column: &str) -> Result<bool> {
+pub(crate) fn table_has_column(
+    conn: &Connection,
+    schema: &str,
+    table: &str,
+    column: &str,
+) -> Result<bool> {
     if !table_exists(conn, schema, table)? {
         return Ok(false);
     }
@@ -588,7 +600,8 @@ fn latest_schema_is_present(conn: &Connection) -> Result<bool> {
             && first_blank_record_uid(conn, "milestones")?.is_none()
             && table_column_is_not_null(conn, "main", "milestones", "media_uid")?
             && table_has_all_columns(conn, "main", "settings", SETTINGS_COLUMNS)?
-            && table_has_all_columns(conn, "main", "profile_picture", PROFILE_PICTURE_COLUMNS)?,
+            && table_has_all_columns(conn, "main", "profile_picture", PROFILE_PICTURE_COLUMNS)?
+            && crate::tracked_app_time::tracked_app_tables_present(conn)?,
     )
 }
 
@@ -618,6 +631,7 @@ fn validate_latest_schema(conn: &Connection) -> Result<()> {
     validate_milestone_media_links(conn)?;
     ensure_table_has_columns(conn, "main", "settings", SETTINGS_COLUMNS)?;
     ensure_table_has_columns(conn, "main", "profile_picture", PROFILE_PICTURE_COLUMNS)?;
+    crate::tracked_app_time::validate_tracked_app_tables(conn)?;
     Ok(())
 }
 
@@ -1801,6 +1815,7 @@ fn create_indexes(conn: &Connection) -> Result<()> {
          ON media(status, tracking_status, id DESC)",
         [],
     )?;
+    crate::tracked_app_time::create_tracked_app_indexes(conn)?;
     Ok(())
 }
 
@@ -1810,6 +1825,7 @@ pub fn create_tables(conn: &Connection) -> Result<()> {
     create_milestones_table(conn)?;
     create_settings_table(conn)?;
     create_profile_picture_table(conn)?;
+    crate::tracked_app_time::create_tracked_app_tables(conn)?;
     Ok(())
 }
 
@@ -5479,8 +5495,8 @@ mod tests {
     }
 
     #[test]
-    fn test_fresh_db_has_latest_columns_and_is_at_schema_v8() {
-        let temp_dir = unique_temp_dir("fresh_v8");
+    fn test_fresh_db_has_latest_columns_and_is_at_schema_v9() {
+        let temp_dir = unique_temp_dir("fresh_v9");
         std::fs::create_dir_all(&temp_dir).unwrap();
 
         let conn = init_db(temp_dir.clone(), None).unwrap();
@@ -5489,13 +5505,17 @@ mod tests {
             get_bundle_schema_version(&conn).unwrap(),
             CURRENT_SCHEMA_VERSION
         );
-        assert_eq!(CURRENT_SCHEMA_VERSION, 8);
+        assert_eq!(CURRENT_SCHEMA_VERSION, 9);
         assert!(table_has_column(&conn, "main", "activity_logs", "notes").unwrap());
         assert!(table_has_column(&conn, "shared", "media", "variant").unwrap());
         assert!(table_has_column(&conn, "shared", "media", "default_activity_type").unwrap());
         assert!(!table_has_column(&conn, "shared", "media", "media_type").unwrap());
         assert!(latest_media_identity_constraints_are_present(&conn).unwrap());
         assert!(table_column_is_not_null(&conn, "main", "milestones", "media_uid").unwrap());
+        // Tracked App Time tables are part of the latest (v9) schema.
+        assert!(table_exists(&conn, "main", "tracked_apps").unwrap());
+        assert!(table_exists(&conn, "main", "usage_entries").unwrap());
+        assert!(crate::tracked_app_time::tracked_app_tables_present(&conn).unwrap());
         assert!(latest_schema_is_present(&conn).unwrap());
         validate_latest_schema(&conn).unwrap();
         assert!(table_has_generated_column(&conn, "main", "activity_logs", "effective_end").unwrap());
@@ -5503,6 +5523,39 @@ mod tests {
             .unwrap();
 
         std::fs::remove_dir_all(temp_dir).ok();
+    }
+
+    #[test]
+    fn test_v8_to_v9_migration_adds_tracked_app_time_tables() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute("ATTACH DATABASE ':memory:' AS shared", [])
+            .unwrap();
+        // Build a v8 bundle: every latest table except the new v9 ones.
+        create_shared_media_table(&conn).unwrap();
+        create_activity_logs_table(&conn).unwrap();
+        create_milestones_table(&conn).unwrap();
+        create_settings_table(&conn).unwrap();
+        create_profile_picture_table(&conn).unwrap();
+        set_bundle_schema_version(&conn, 8).unwrap();
+
+        assert!(!table_exists(&conn, "main", "tracked_apps").unwrap());
+        assert!(!table_exists(&conn, "main", "usage_entries").unwrap());
+
+        migrate_schema(&conn).unwrap();
+
+        assert_eq!(
+            get_bundle_schema_version(&conn).unwrap(),
+            CURRENT_SCHEMA_VERSION
+        );
+        assert!(table_exists(&conn, "main", "tracked_apps").unwrap());
+        assert!(table_exists(&conn, "main", "usage_entries").unwrap());
+        assert!(latest_schema_is_present(&conn).unwrap());
+        // Re-running is a no-op that still validates (idempotent upgrade).
+        migrate_schema(&conn).unwrap();
+        assert_eq!(
+            get_bundle_schema_version(&conn).unwrap(),
+            CURRENT_SCHEMA_VERSION
+        );
     }
 
     #[test]

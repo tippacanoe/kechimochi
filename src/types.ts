@@ -442,6 +442,52 @@ export interface Milestone {
     date?: string;
 }
 
+// Tracked App Time (soft-fork feature). Field names match the Rust structs so
+// they serialize unchanged over both Tauri invoke and the HTTP API.
+export type UsageSource = 'android_auto' | 'manual';
+export type UsagePlatform = 'android' | 'desktop' | 'web';
+
+export interface TrackedApp {
+    id?: number;
+    uid?: string;
+    display_name: string;
+    android_package_name?: string | null;
+    icon?: string | null;
+    auto_tracking_enabled: boolean;
+    manual_entry_enabled: boolean;
+    created_at?: string | null;
+    archived: boolean;
+}
+
+export interface UsageEntry {
+    id?: number;
+    uid?: string;
+    tracked_app_uid: string;
+    date: string;
+    minutes: number;
+    source: UsageSource;
+    platform: UsagePlatform;
+    manual_adjustment_minutes?: number | null;
+    created_at?: string | null;
+    updated_at?: string | null;
+    device_id?: string | null;
+}
+
+export interface AppDailyTotal {
+    tracked_app_uid: string;
+    display_name: string;
+    date: string;
+    total_minutes: number;
+}
+
+// Result of an Android automatic-collection run. The Rust struct uses camelCase
+// serialization, so these fields are camelCase (unlike the data structs above).
+export interface UsageRefreshOutcome {
+    available: boolean;
+    permissionGranted: boolean;
+    updatedEntries: number;
+}
+
 export interface RecoveryMilestone {
     id: number;
     name: string;

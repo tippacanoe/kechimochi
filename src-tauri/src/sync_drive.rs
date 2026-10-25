@@ -1768,6 +1768,8 @@ mod tests {
             )]),
             profile_picture: None,
             tombstones: vec![],
+            tracked_apps: std::collections::BTreeMap::new(),
+            usage_entries: Vec::new(),
         }
     }
 

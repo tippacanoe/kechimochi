@@ -69,5 +69,19 @@ commands.allow = [
     "import_full_backup",
     "clear_sync_backups",
     "get_local_http_api_status",
-    "save_local_http_api_config"
+    "save_local_http_api_config",
+    "get_tracked_apps",
+    "add_tracked_app",
+    "update_tracked_app",
+    "set_tracked_app_archived",
+    "add_usage_entry",
+    "set_usage_entry_adjustment",
+    "delete_usage_entry",
+    "get_usage_entries_for_day",
+    "get_tracked_app_daily_totals",
+    "get_tracked_app_total_minutes",
+    "refresh_tracked_app_usage",
+    "open_usage_access_settings",
+    "export_tracked_app_usage_csv",
+    "import_tracked_app_usage_csv"
 ]
